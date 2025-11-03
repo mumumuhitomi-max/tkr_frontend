@@ -57,9 +57,9 @@ const Card: React.FC<React.PropsWithChildren<{ className?: string; title?: React
   </div>
 );
 
-const SectionTitle: React.FC<React.PropsWithChildren> = ({ children }) => (
-  <h2 className="text-[18px] md:text-[20px] font-semibold text-[#1f2328]">{children}</h2>
-);
+//const SectionTitle: React.FC<React.PropsWithChildren> = ({ children }) => (
+//  <h2 className="text-[18px] md:text-[20px] font-semibold text-[#1f2328]">{children}</h2>
+//);
 
 const Label: React.FC<React.PropsWithChildren> = ({ children }) => (
   <label className="text-[13px] text-[#667085] block mb-1">{children}</label>
