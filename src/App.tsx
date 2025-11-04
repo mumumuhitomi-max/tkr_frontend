@@ -18,10 +18,10 @@ import {
 import { ToastContainer, toast } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 
-/** 环境变量：后端基础地址（Vercel→Environment Variables 配置 VITE_API_BASE） */
+/** 后端基础地址（Vercel 项目里配 VITE_API_BASE；本地回退 127.0.0.1:8000） */
 const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
 
-/* ------------------------ 小组件 ------------------------ */
+/* ------------------------ 复用小组件 ------------------------ */
 const Container: React.FC<React.PropsWithChildren<{ className?: string }>> = ({ className, children }) => (
   <div className={`mx-auto px-6 ${className || ""}`} style={{ maxWidth: 1200 }}>
     {children}
@@ -532,7 +532,7 @@ export default function App() {
           </div>
         )}
 
-        {/* 2) 公演プログラム / 场刊检索（列精简 + 图片容错） */}
+        {/* 2) 公演プログラム / 场刊检索 */}
         {tab === "program" && (
           <div className="grid lg:grid-cols-3 gap-8">
             <Card title="搜索条件 / 検索条件" className="lg:col-span-1">
@@ -762,7 +762,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Goethe 预设（Forum/Umeda 列表） */}
               {(gForum.length > 0 || gUmeda.length > 0) && (
                 <div className="mt-8 space-y-8">
                   <div>
