@@ -9,13 +9,14 @@ import {
   ChevronRight,
   Sparkles,
   RefreshCw,
+  Target,
 } from 'lucide-react'
 import { ToastContainer, toast } from 'react-toastify'
 import 'react-toastify/dist/ReactToastify.css'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000'
 
-type TabKey = 'steel' | 'program' | 'bulk'
+type TabKey = 'steel' | 'program' | 'bulk' | 'probe'
 
 interface ProgramRow {
   title?: string
@@ -42,6 +43,20 @@ interface ProgramResponse {
 interface BroResponse {
   prefix: string
   results: BroRow[]
+}
+
+interface CodeProbeRow {
+  code: string
+  page_ok: boolean
+  img_ok: boolean
+  page_url: string
+  img_url: string
+}
+
+interface CodeProbeResponse {
+  prefix: string
+  range: { min: number; max: number }
+  results: CodeProbeRow[]
 }
 
 // 从程序册 / スチール链接中提取数字编码，例如 "https://.../g/g672176/" → "672176"
@@ -76,6 +91,12 @@ const tabs: { key: TabKey; labelJa: string; labelCn: string; icon: React.ReactNo
     labelCn: '批量检索',
     icon: <Search className="w-4 h-4" />,
   },
+  {
+    key: 'probe',
+    labelJa: 'コード範囲探測',
+    labelCn: 'CODE 区间探测',
+    icon: <Target className="w-4 h-4" />,
+  },
 ]
 
 function App() {
@@ -101,15 +122,22 @@ function App() {
   const [bulkLoading, setBulkLoading] = useState<boolean>(false)
   const [bulkResults, setBulkResults] = useState<ProgramRow[]>([])
 
+  // CODE 区间探测
+  const [probePrefix, setProbePrefix] = useState<string>('6742')
+  const [probeMin, setProbeMin] = useState<number>(10)
+  const [probeMax, setProbeMax] = useState<number>(40)
+  const [probeLoading, setProbeLoading] = useState<boolean>(false)
+  const [probeResults, setProbeResults] = useState<CodeProbeRow[]>([])
+  const [probeLastRange, setProbeLastRange] = useState<{ min: number; max: number } | null>(null)
+
   // 大图 modal
   const [modalImage, setModalImage] = useState<string | null>(null)
   const [modalTitle, setModalTitle] = useState<string>('')
 
-  const apiGet = async (path: string, params: Record<string, string | number | undefined>) => {
+  const apiGet = async (path: string, params: Record<string, string | number | string[] | undefined>) => {
     const qs = new URLSearchParams()
     Object.entries(params).forEach(([k, v]) => {
       if (v === undefined || v === null || v === '') return
-      // q 支持多值
       if (k === 'q' && Array.isArray(v)) {
         v.forEach((val) => qs.append('q', String(val)))
       } else {
@@ -142,7 +170,7 @@ function App() {
     }
   }
 
-  // スチール写真链接推测
+  // スチール照片链接推测（BRO）
   const handleBroSearch = async () => {
     if (!broPrefix.trim()) {
       toast.info('プレフィックスを入力してください / 请输入前缀')
@@ -192,6 +220,34 @@ function App() {
     }
   }
 
+  // CODE 区间探测
+  const handleProbeSearch = async () => {
+    if (!probePrefix.trim()) {
+      toast.info('プレフィックスを入力してください / 请输入 CODE 前缀')
+      return
+    }
+    if (probeMax < probeMin) {
+      toast.info('終了番号は開始番号以上である必要があります / 结束号需大于等于起始号')
+      return
+    }
+    try {
+      setProbeLoading(true)
+      setProbeLastRange({ min: probeMin, max: probeMax })
+      const json: CodeProbeResponse = await apiGet('/api/code_probe', {
+        prefix: probePrefix.trim(),
+        ss_min: probeMin,
+        ss_max: probeMax,
+      })
+      setProbeResults(json.results || [])
+      toast.success('コード範囲の探測が完了しました / CODE 区间探测完成')
+    } catch (e) {
+      console.error(e)
+      toast.error('取得に失敗しました / 获取失败')
+    } finally {
+      setProbeLoading(false)
+    }
+  }
+
   const renderImageCell = (row: { url?: string; code?: string; title?: string }) => {
     const code = row.code && row.code.length > 0 ? row.code : extractCodeFromUrl(row.url)
     if (!code) {
@@ -238,9 +294,20 @@ function App() {
         )
       : 0
 
+  const probeProgress =
+    probeLastRange && probeLastRange.max >= probeLastRange.min
+      ? Math.min(
+          100,
+          Math.round(
+            (probeResults.length /
+              (probeLastRange.max - probeLastRange.min + 1 || 1)) * 100,
+          ),
+        )
+      : 0
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#f9fafb] via-[#fef9f7] to-[#fdf6ff] text-[#111827]">
-      {/* 顶部 Header */}
+      {/* Header */}
       <header className="border-b border-[#e5e7eb]/80 bg-white/70 backdrop-blur-md sticky top-0 z-20">
         <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -252,7 +319,7 @@ function App() {
                 Takarazuka Link Finder
               </h1>
               <p className="text-xs md:text-[13px] text-[#6b7280]">
-                宝塚 ONLINE 商品リンク & 画像パターン探索 / Takarazuka 在线商品链接 & 图片模式探测器
+                宝塚 ONLINE 商品リンク & 画像パターン探索 / 在线商品链接 & 图片模式探测器
               </p>
             </div>
           </div>
@@ -266,9 +333,9 @@ function App() {
         </div>
       </header>
 
-      {/* 内容区 */}
+      {/* Main */}
       <main className="max-w-6xl mx-auto px-4 pb-12 pt-5">
-        {/* Tab 切换 */}
+        {/* Tabs */}
         <div className="mb-4">
           <div className="inline-flex rounded-full bg-white/70 backdrop-blur border border-[#e5e7eb] p-1 shadow-sm">
             {tabs.map((t) => (
@@ -282,15 +349,17 @@ function App() {
                 }`}
               >
                 {t.icon}
-                <span className="hidden md:inline">{t.labelJa} / {t.labelCn}</span>
+                <span className="hidden md:inline">
+                  {t.labelJa} / {t.labelCn}
+                </span>
                 <span className="md:hidden">{t.labelJa}</span>
               </button>
             ))}
           </div>
         </div>
 
-        {/* Tabs 内容 */}
         <AnimatePresence mode="wait">
+          {/* スチール写真链接推测 */}
           {activeTab === 'steel' && (
             <motion.section
               key="steel"
@@ -300,7 +369,7 @@ function App() {
               transition={{ duration: 0.18 }}
               className="space-y-4"
             >
-              {/* 说明卡片 */}
+              {/* 说明 */}
               <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-4 md:p-5 flex flex-col gap-2">
                 <div className="flex items-center gap-2">
                   <Camera className="w-4 h-4 text-pink-500" />
@@ -469,6 +538,7 @@ function App() {
             </motion.section>
           )}
 
+          {/* 公演プログラム / 场刊检索 */}
           {activeTab === 'program' && (
             <motion.section
               key="program"
@@ -621,6 +691,7 @@ function App() {
             </motion.section>
           )}
 
+          {/* 公演名一括 / 批量检索 */}
           {activeTab === 'bulk' && (
             <motion.section
               key="bulk"
@@ -759,6 +830,216 @@ function App() {
                               )}
                             </td>
                             <td className="px-2 py-2 align-top">{renderImageCell(row)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </motion.section>
+          )}
+
+          {/* コード範囲探測 / CODE 区间探测 */}
+          {activeTab === 'probe' && (
+            <motion.section
+              key="probe"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.18 }}
+              className="space-y-4"
+            >
+              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-4 md:p-5 flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <Target className="w-4 h-4 text-pink-500" />
+                  <h2 className="text-[15px] md:text-[16px] font-semibold text-[#111827]">
+                    コード範囲探測 / CODE 区间探测
+                  </h2>
+                </div>
+                <p className="text-[12px] md:text-[13px] text-[#4b5563] leading-relaxed">
+                  まだ
+                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
+                    cpro
+                  </span>
+                  リストに載っていない可能性のある商品を、
+                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
+                    g/gCODE/
+                  </span>
+                  と
+                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
+                    itemimages/CODE_01.jpg
+                  </span>
+                  に対する HEAD リクエストで直接探測します。
+                  例：prefix=
+                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
+                    6742
+                  </span>
+                  ，范围 10〜40 → 674210〜674240 を一括チェック。
+                </p>
+              </div>
+
+              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-4 md:p-5 space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+                  <div>
+                    <label className="block text-[11px] md:text-[12px] text-[#6b7280] mb-1">
+                      プレフィックス / 前缀 (例: 6742)
+                    </label>
+                    <input
+                      value={probePrefix}
+                      onChange={(e) => setProbePrefix(e.target.value)}
+                      className="w-full rounded-xl border border-[#e5e7eb] bg-white/70 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-pink-200 focus:border-pink-400 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] md:text-[12px] text-[#6b7280] mb-1">
+                      開始下2桁 / 起始后两位
+                    </label>
+                    <input
+                      type="number"
+                      value={probeMin}
+                      onChange={(e) => setProbeMin(Number(e.target.value) || 0)}
+                      className="w-full rounded-xl border border-[#e5e7eb] bg-white/70 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-pink-200 focus:border-pink-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] md:text-[12px] text-[#6b7280] mb-1">
+                      終了下2桁 / 结束后两位
+                    </label>
+                    <input
+                      type="number"
+                      value={probeMax}
+                      onChange={(e) => setProbeMax(Number(e.target.value) || 0)}
+                      className="w-full rounded-xl border border-[#e5e7eb] bg-white/70 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-pink-200 focus:border-pink-400"
+                    />
+                  </div>
+                  <div className="flex items-end">
+                    <button
+                      type="button"
+                      onClick={handleProbeSearch}
+                      disabled={probeLoading}
+                      className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 text-white text-[13px] px-4 py-2.5 shadow-md hover:shadow-lg active:scale-[0.98] transition disabled:opacity-60"
+                    >
+                      {probeLoading ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          探測中… / 探测中…
+                        </>
+                      ) : (
+                        <>
+                          <Search className="w-4 h-4" />
+                          コード探測 / 探测 CODE
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {probeLastRange && (
+                  <div className="flex-1 min-w-[200px]">
+                    <div className="flex items-center justify-between text-[11px] text-[#6b7280] mb-1">
+                      <span>探索进度 / Scan progress</span>
+                      <span>
+                        {probeResults.length} /{' '}
+                        {probeLastRange.max - probeLastRange.min + 1 || 1}
+                      </span>
+                    </div>
+                    <div className="w-full h-2 rounded-full bg-[#f3f4f6] overflow-hidden">
+                      <div
+                        className="h-2 bg-gradient-to-r from-pink-400 to-amber-400 transition-all"
+                        style={{ width: `${probeProgress}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-3 md:p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-[14px] md:text-[15px] font-semibold text-[#111827] flex items-center gap-2">
+                    <Link2 className="w-4 h-4 text-pink-500" />
+                    探測結果 / 探测结果
+                  </h3>
+                  <span className="text-[11px] text-[#6b7280]">
+                    {probeResults.length} HIT
+                  </span>
+                </div>
+                {probeResults.length === 0 ? (
+                  <p className="text-[12px] text-[#9ca3af]">
+                    まだ HIT がありません。プレフィックスと下2桁範囲を指定して探測してみてください。
+                    / 暂无命中，请先指定前缀与后两位范围进行探测。
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full text-[12px] md:text-[13px]">
+                      <thead>
+                        <tr className="border-b border-[#e5e7eb] bg-[#f9fafb]">
+                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
+                            CODE
+                          </th>
+                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
+                            PAGE / 页面
+                          </th>
+                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
+                            IMG / 图片
+                          </th>
+                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
+                            画像プレビュー / 预览
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {probeResults.map((row, idx) => (
+                          <tr
+                            key={idx}
+                            className="border-b border-[#f3f4f6] hover:bg-pink-50/40 transition"
+                          >
+                            <td className="px-2 py-2 font-mono text-xs text-[#111827]">
+                              {row.code}
+                              <div className="text-[10px] text-[#9ca3af]">
+                                {row.page_ok ? 'PAGE✓ ' : 'PAGE× '}
+                                {row.img_ok ? 'IMG✓' : 'IMG×'}
+                              </div>
+                            </td>
+                            <td className="px-2 py-2 align-top">
+                              <a
+                                href={row.page_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1 text-blue-600 hover:underline break-all"
+                              >
+                                <ChevronRight className="w-3 h-3" />
+                                {row.page_url}
+                              </a>
+                            </td>
+                            <td className="px-2 py-2 align-top">
+                              <a
+                                href={row.img_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className={`inline-flex items-center gap-1 break-all ${
+                                  row.img_ok
+                                    ? 'text-blue-600 hover:underline'
+                                    : 'text-[#9ca3af]'
+                                }`}
+                              >
+                                <ImageIcon className="w-3 h-3" />
+                                {row.img_url}
+                              </a>
+                            </td>
+                            <td className="px-2 py-2 align-top">
+                              {row.img_ok ? (
+                                renderImageCell({
+                                  code: row.code,
+                                  url: row.page_url,
+                                  title: `CODE ${row.code}`,
+                                })
+                              ) : (
+                                <span className="text-xs text-[#9ca3af]">
+                                  画像未上传 / 图片尚未存在
+                                </span>
+                              )}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
