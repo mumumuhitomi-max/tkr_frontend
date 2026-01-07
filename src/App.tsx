@@ -5,7 +5,15 @@ import { ToastContainer, toast } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 
 type Troupe = { jp: string; cn: string; emoji: string; color: string };
-type CardItem = { url: string; code: string; title?: string; date?: string | null; troupe_idx?: string | null; troupe?: Troupe | null };
+type CardItem = {
+  url: string;
+  code: string;
+  prefix?: string | null;
+  title?: string;
+  date?: string | null;
+  troupe_idx?: string | null;
+  troupe?: Troupe | null;
+};
 type CardsResp = { keyword: string; title_filter: string[]; results: CardItem[]; error?: string; message?: string };
 
 type PrefixSeq = { prefix: string; delta_days?: number | null; date?: string | null; count: number; images: string[] };
@@ -14,6 +22,7 @@ type ImagesResp = {
   card_url: string;
   title?: string;
   code: string;
+  prefix_from_code?: string | null;
   base_date?: string | null;
   troupe?: Troupe | null;
   groups: {
@@ -21,6 +30,7 @@ type ImagesResp = {
     main_stills?: { prefixes: PrefixSeq[] };
     rookie_stills?: { prefixes: PrefixSeq[] };
     unknown_prefix_stills?: { prefixes: PrefixSeq[] };
+    special_L_single?: { count: number; images: string[] };
     special_L_series?: { count: number; images: string[] };
   };
   error?: string;
@@ -31,7 +41,6 @@ type ImagesResp = {
 const API_BASE = (import.meta as any).env?.VITE_API_BASE || "http://127.0.0.1:8000";
 
 const cls = (...a: Array<string | false | undefined | null>) => a.filter(Boolean).join(" ");
-
 const cardWrap =
   "rounded-2xl border border-black/10 bg-white/75 shadow-[0_18px_60px_rgba(15,23,42,0.10)] backdrop-blur p-4 md:p-5";
 const btn =
@@ -88,46 +97,6 @@ function Modal({
   );
 }
 
-function StepHeader() {
-  return (
-    <div className="rounded-2xl border border-black/10 bg-white/70 p-4 md:p-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="text-xs text-black/55">API: {API_BASE}</div>
-          <h1 className="mt-1 text-[22px] md:text-[30px] font-extrabold tracking-tight text-[#111827]">
-            宝塚 ONLINE 画像探測ツール / 商品图探测工具
-          </h1>
-          <p className="mt-1 text-sm md:text-base text-black/60">
-            ① 小卡を検索（コレクションカード）→ ② 探图（定妆・舞写・新人公演も自動探索）→ ③ 画像をクリックして拡大
-            <br />
-            ① 搜小卡 → ② 点“探图”（自动找定妆/舞写/新人公演）→ ③ 点击图片放大
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-2 rounded-full border border-black/10 bg-white/70 px-3 py-1 text-xs text-black/70">
-            <Sparkles size={14} /> 小白友好 / わかりやすい
-          </span>
-        </div>
-      </div>
-
-      {/* Step bar */}
-      <div className="mt-4 grid grid-cols-3 gap-2">
-        {[
-          { t: "STEP 1", s: "小卡检索 / 小卡検索" },
-          { t: "STEP 2", s: "一键探图 / 探図" },
-          { t: "STEP 3", s: "点击放大 / 拡大" },
-        ].map((x) => (
-          <div key={x.t} className="rounded-xl border border-black/10 bg-white/60 p-3">
-            <div className="text-xs font-extrabold text-black/70">{x.t}</div>
-            <div className="mt-1 text-sm font-semibold text-[#111827]">{x.s}</div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function TroupeBadge({ troupe }: { troupe?: Troupe | null }) {
   if (!troupe) return null;
   return (
@@ -140,423 +109,6 @@ function TroupeBadge({ troupe }: { troupe?: Troupe | null }) {
       <span className="text-black/40">/</span>
       <span className="text-black/60">{troupe.cn}</span>
     </span>
-  );
-}
-
-export default function App() {
-  // Search controls
-  const [keyword, setKeyword] = useState("コレクションカード");
-  const [titleFilter, setTitleFilter] = useState("Goethe");
-  const [cardsLoading, setCardsLoading] = useState(false);
-  const [cards, setCards] = useState<CardItem[]>([]);
-
-  // Probe controls
-  const [maxImages, setMaxImages] = useState(200);
-  const [extraPrefix, setExtraPrefix] = useState(""); // optional manual
-  const [probing, setProbing] = useState(false);
-  const [picked, setPicked] = useState<CardItem | null>(null);
-  const [imagesResp, setImagesResp] = useState<ImagesResp | null>(null);
-
-  // Modal
-  const [modalOpen, setModalOpen] = useState(false);
-  const [modalSrc, setModalSrc] = useState("");
-
-  const resultsRef = useRef<HTMLDivElement | null>(null);
-
-  const titleFiltersArr = useMemo(() => {
-    return titleFilter
-      .split(/[,\s]+/g)
-      .map((x) => x.trim())
-      .filter(Boolean);
-  }, [titleFilter]);
-
-  const extraPrefixArr = useMemo(() => {
-    return extraPrefix
-      .split(/[,\s]+/g)
-      .map((x) => x.trim())
-      .filter(Boolean);
-  }, [extraPrefix]);
-
-  function copy(text: string) {
-    navigator.clipboard.writeText(text);
-    toast.success("コピーしました！/ 已复制");
-  }
-
-  async function loadCards() {
-    setCardsLoading(true);
-    setCards([]);
-    setPicked(null);
-    setImagesResp(null);
-    try {
-      const u = new URL(`${API_BASE}/api/cards`);
-      u.searchParams.set("keyword", keyword);
-      u.searchParams.set("page_size", "80");
-      for (const f of titleFiltersArr) u.searchParams.append("title_filter", f);
-
-      const r = await fetch(u.toString());
-      const j = (await r.json()) as CardsResp;
-      setCards(j.results || []);
-      if ((j.results || []).length === 0) toast.info("結果がありません / 没有结果：请换关键词或清空过滤词再试");
-      else toast.success(`小卡：${j.results.length} 件 / ${j.results.length} 件`);
-    } catch (e: any) {
-      toast.error(`检索失败 / 検索失敗：${e?.message || e}`);
-    } finally {
-      setCardsLoading(false);
-    }
-  }
-
-  async function probe(card: CardItem) {
-    setPicked(card);
-    setProbing(true);
-    setImagesResp(null);
-
-    try {
-      const u = new URL(`${API_BASE}/api/card_images`);
-      u.searchParams.set("card_url", card.url);
-      u.searchParams.set("max_images", String(maxImages));
-      u.searchParams.set("start_n", "1");
-      for (const p of extraPrefixArr) u.searchParams.append("extra_prefix", p);
-
-      const r = await fetch(u.toString());
-      const j = (await r.json()) as ImagesResp;
-      setImagesResp(j);
-
-      // scroll to results
-      setTimeout(() => {
-        resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-      }, 50);
-
-      const total =
-        (j.groups?.card_images?.images?.length || 0) +
-        (j.groups?.special_L_series?.images?.length || 0) +
-        (j.groups?.main_stills?.prefixes || []).reduce((a, x) => a + (x.images?.length || 0), 0) +
-        (j.groups?.rookie_stills?.prefixes || []).reduce((a, x) => a + (x.images?.length || 0), 0);
-
-      if (total === 0) toast.warning("没有探测到图片 / 画像が見つかりません（可尝试手动补前缀）");
-      else toast.success(`画像：${total} 枚 / ${total} 枚`);
-    } catch (e: any) {
-      toast.error(`探图失败 / 探図失敗：${e?.message || e}`);
-    } finally {
-      setProbing(false);
-    }
-  }
-
-  useEffect(() => {
-    toast.info("先点「检索」得到小卡列表，再点「探图」 / まず検索→次に探図");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // --- Render helpers ---
-  const timelineGroups = useMemo(() => {
-    // cards already sorted desc by backend
-    return cards;
-  }, [cards]);
-
-  const mainBlocks = imagesResp?.groups?.main_stills?.prefixes || [];
-  const rookieBlocks = imagesResp?.groups?.rookie_stills?.prefixes || [];
-  const unknownBlocks = imagesResp?.groups?.unknown_prefix_stills?.prefixes || [];
-  const cardImgs = imagesResp?.groups?.card_images?.images || [];
-  const specialL = imagesResp?.groups?.special_L_series?.images || [];
-
-  return (
-    <div className="min-h-screen bg-[radial-gradient(1200px_700px_at_20%_-10%,rgba(247,215,218,0.65),transparent_60%),radial-gradient(1000px_600px_at_80%_0%,rgba(244,214,200,0.55),transparent_55%),linear-gradient(180deg,#fffaf5,#ffffff)]">
-      <ToastContainer position="bottom-right" autoClose={1500} hideProgressBar />
-
-      <div className="mx-auto w-full max-w-6xl px-4 py-6 md:py-10">
-        <StepHeader />
-
-        {/* Controls */}
-        <div className={cls(cardWrap, "mt-5")}>
-          <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-            <div>
-              <div className="text-sm font-semibold text-[#111827]">STEP 1：小卡检索 / 小卡検索</div>
-              <div className="mt-1 text-xs text-black/60">
-                只要记住一句话：先用“コレクションカード”搜到小卡链接，再点“探图”。<br />
-                覚えるのはこれだけ：コレクションカードを検索→探図。
-              </div>
-            </div>
-            <button onClick={loadCards} className={cls(btn, btnPrimary)} disabled={cardsLoading}>
-              <Search size={16} />
-              {cardsLoading ? "检索中… / 検索中…" : "检索 / 検索"}
-            </button>
-          </div>
-
-          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-            <label className="block">
-              <div className="text-xs font-semibold text-black/70">Keyword（商品类别 / 種類）</div>
-              <input
-                value={keyword}
-                onChange={(e) => setKeyword(e.target.value)}
-                className="mt-1 w-full rounded-xl border border-black/10 bg-white/80 px-3 py-2 text-sm outline-none focus:border-[#e7bcb5]"
-                placeholder="例：コレクションカード"
-              />
-              <div className="mt-1 text-[11px] text-black/50">默认：コレクションカード</div>
-            </label>
-
-            <label className="block md:col-span-2">
-              <div className="text-xs font-semibold text-black/70">作品过滤（可空 / 空でもOK）</div>
-              <input
-                value={titleFilter}
-                onChange={(e) => setTitleFilter(e.target.value)}
-                className="mt-1 w-full rounded-xl border border-black/10 bg-white/80 px-3 py-2 text-sm outline-none focus:border-[#e7bcb5]"
-                placeholder="例：Goethe / ゲーテ / 阿修羅城"
-              />
-              <div className="mt-1 text-[11px] text-black/50">
-                多个词用空格/逗号分隔，逻辑为 AND（都要包含）。不敏感的话：先留空。
-              </div>
-            </label>
-          </div>
-
-          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-            <label className="block">
-              <div className="text-xs font-semibold text-black/70">画像上限 / 上限</div>
-              <input
-                type="number"
-                value={maxImages}
-                min={1}
-                max={400}
-                onChange={(e) => setMaxImages(Number(e.target.value || 200))}
-                className="mt-1 w-full rounded-xl border border-black/10 bg-white/80 px-3 py-2 text-sm outline-none focus:border-[#e7bcb5]"
-              />
-              <div className="mt-1 text-[11px] text-black/50">建议 200</div>
-            </label>
-
-            <label className="block md:col-span-2">
-              <div className="text-xs font-semibold text-black/70">
-                手动补前缀（可空 / 空でもOK）
-              </div>
-              <input
-                value={extraPrefix}
-                onChange={(e) => setExtraPrefix(e.target.value)}
-                className="mt-1 w-full rounded-xl border border-black/10 bg-white/80 px-3 py-2 text-sm outline-none focus:border-[#e7bcb5]"
-                placeholder="例：2505114（新人公演等特殊情况；多个用空格/逗号）"
-              />
-              <div className="mt-1 text-[11px] text-black/50">
-                一般不用填。只有当“新人公演图没出来”时，再把你已知的 prefix 粘进来重试。
-              </div>
-            </label>
-          </div>
-        </div>
-
-        {/* Two-column layout */}
-        <div className="mt-6 grid grid-cols-1 gap-5 md:grid-cols-2">
-          {/* Left: timeline */}
-          <div className={cardWrap}>
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-semibold text-[#111827]">小卡时间轴 / タイムライン</div>
-              <div className="text-xs text-black/50">{timelineGroups.length} 件</div>
-            </div>
-
-            {cardsLoading && (
-              <div className="mt-3 space-y-3">
-                {Array.from({ length: 7 }).map((_, i) => (
-                  <div key={i} className="rounded-2xl border border-black/10 bg-white/60 p-4 animate-pulse">
-                    <div className="h-4 w-2/3 rounded bg-black/10" />
-                    <div className="mt-2 h-3 w-1/2 rounded bg-black/10" />
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {!cardsLoading && timelineGroups.length === 0 && (
-              <div className="mt-4 rounded-2xl border border-black/10 bg-white/60 p-4 text-sm text-black/60">
-                还没有结果：先点上方“检索”。如果仍为空：把“作品过滤”清空再试。
-              </div>
-            )}
-
-            {!cardsLoading && timelineGroups.length > 0 && (
-              <div className="mt-3">
-                <div className="relative pl-5">
-                  <div className="absolute left-2 top-2 bottom-2 w-[2px] bg-gradient-to-b from-black/10 via-black/10 to-transparent" />
-                  <div className="space-y-3">
-                    {timelineGroups.map((c) => {
-                      const troupe = c.troupe || null;
-                      const isPicked = picked?.code === c.code;
-                      return (
-                        <div
-                          key={c.code}
-                          className={cls(
-                            "relative rounded-2xl border bg-white/75 p-4 transition",
-                            isPicked ? "border-[#e7bcb5] shadow-lg" : "border-black/10 hover:shadow-md"
-                          )}
-                        >
-                          {/* dot */}
-                          <div
-                            className="absolute -left-[3px] top-5 h-3 w-3 rounded-full border border-white shadow"
-                            style={{ background: troupe?.color || "#cbd5e1" }}
-                          />
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <TroupeBadge troupe={troupe} />
-                                {c.date && (
-                                  <span className="text-xs font-semibold text-black/60">
-                                    {c.date}
-                                  </span>
-                                )}
-                              </div>
-                              <div className="mt-2 text-sm font-semibold text-[#111827] truncate">
-                                {c.title || "（标题未取到 / タイトル不明）"}
-                              </div>
-                              <div className="mt-1 text-xs text-black/50 truncate">
-                                code: {c.code}
-                              </div>
-                              <div className="mt-2 flex flex-wrap gap-2">
-                                <button className={cls(btn, btnGhost, "px-3 py-1.5 text-xs")} onClick={() => copy(c.url)}>
-                                  <ClipboardCopy size={14} /> URL
-                                </button>
-                                <a
-                                  className={cls(btn, btnGhost, "px-3 py-1.5 text-xs")}
-                                  href={c.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                >
-                                  <ExternalLink size={14} /> 開く / 打开
-                                </a>
-                              </div>
-                            </div>
-
-                            <button
-                              className={cls(btn, btnPrimary, "shrink-0")}
-                              onClick={() => probe(c)}
-                              disabled={probing}
-                            >
-                              <ImageIcon size={16} />
-                              {probing && isPicked ? "探图中…" : "探图"}
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Right: results */}
-          <div className={cardWrap}>
-            <div ref={resultsRef} className="flex items-center justify-between">
-              <div className="text-sm font-semibold text-[#111827]">探图结果 / 探図結果</div>
-              <div className="text-xs text-black/50">
-                {picked ? `已选择 / 選択：${picked.troupe?.jp || ""}` : "未选择 / 未選択"}
-              </div>
-            </div>
-
-            {!picked && (
-              <div className="mt-4 rounded-2xl border border-black/10 bg-white/60 p-4 text-sm text-black/60">
-                左侧时间轴里点“探图”即可。<br />
-                左のタイムラインで「探図」を押してください。
-              </div>
-            )}
-
-            {picked && probing && (
-              <div className="mt-4 rounded-2xl border border-black/10 bg-white/60 p-4">
-                <div className="text-sm font-semibold text-[#111827]">正在探测中… / 探索中…</div>
-                <div className="mt-2 text-xs text-black/60">
-                  会自动尝试：卡片图 / 定妆舞写 / 新人公演 / 特殊 L 图（如 DEAN）。
-                </div>
-                <div className="mt-3 grid grid-cols-2 gap-3">
-                  {Array.from({ length: 6 }).map((_, i) => (
-                    <div key={i} className="aspect-[3/4] rounded-2xl border border-black/10 bg-white/50 animate-pulse" />
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {picked && !probing && imagesResp && (
-              <div className="mt-4 space-y-5">
-                <div className="rounded-2xl border border-black/10 bg-white/70 p-4">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <TroupeBadge troupe={imagesResp.troupe || null} />
-                    {imagesResp.base_date && (
-                      <span className="text-xs font-semibold text-black/60">
-                        基准日 / 基準：{imagesResp.base_date}
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-2 text-sm font-semibold text-[#111827]">
-                    {imagesResp.title || "（标题未取到 / タイトル不明）"}
-                  </div>
-                  <div className="mt-1 text-xs text-black/50 break-all">
-                    {imagesResp.card_url}
-                  </div>
-                </div>
-
-                {/* Section helper */}
-                <div className="rounded-2xl border border-black/10 bg-white/60 p-4 text-sm text-black/60">
-                  结果分区说明（只记三句话）：<br />
-                  1）「小卡画像」= 小卡商品本身能直接拿到的图<br />
-                  2）「定妆・舞写」= 最常见的舞台照序列（通常命中最多）<br />
-                  3）「新人公演」= 日期更晚的序列（系统已自动向后扩展候选）<br />
-                </div>
-
-                {/* Card images */}
-                <Section
-                  title="小卡画像 / 小卡画像"
-                  hint="小卡商品页/单图直连能拿到的图片"
-                  images={cardImgs}
-                  onOpen={(u) => {
-                    setModalSrc(u);
-                    setModalOpen(true);
-                  }}
-                  onCopy={copy}
-                />
-
-                {/* Main stills */}
-                <PrefixSection
-                  title="定妆・舞写 / 定妆・舞写"
-                  blocks={mainBlocks}
-                  onOpen={(u) => {
-                    setModalSrc(u);
-                    setModalOpen(true);
-                  }}
-                  onCopy={copy}
-                />
-
-                {/* Rookie stills */}
-                <PrefixSection
-                  title="新人公演（候补）/ 新人公演（候補）"
-                  blocks={rookieBlocks}
-                  onOpen={(u) => {
-                    setModalSrc(u);
-                    setModalOpen(true);
-                  }}
-                  onCopy={copy}
-                />
-
-                {/* Unknown */}
-                {unknownBlocks.length > 0 && (
-                  <PrefixSection
-                    title="不明前缀命中 / 不明prefix"
-                    blocks={unknownBlocks}
-                    onOpen={(u) => {
-                      setModalSrc(u);
-                      setModalOpen(true);
-                    }}
-                    onCopy={copy}
-                  />
-                )}
-
-                {/* Special L series */}
-                <Section
-                  title="特殊画像（L系列）/ 特殊（L）"
-                  hint="部分公演不走 S/prefix-NNN，而是 L/xxxx.jpg"
-                  images={specialL}
-                  onOpen={(u) => {
-                    setModalSrc(u);
-                    setModalOpen(true);
-                  }}
-                  onCopy={copy}
-                />
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <Modal open={modalOpen} onClose={() => setModalOpen(false)} src={modalSrc} title={imagesResp?.title} />
-    </div>
   );
 }
 
@@ -689,6 +241,358 @@ function PrefixSection({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+export default function App() {
+  const [keyword, setKeyword] = useState("コレクションカード");
+  const [titleFilter, setTitleFilter] = useState("");
+  const [cardsLoading, setCardsLoading] = useState(false);
+  const [cards, setCards] = useState<CardItem[]>([]);
+
+  const [maxImages, setMaxImages] = useState(200);
+  const [extraPrefix, setExtraPrefix] = useState("");
+  const [probing, setProbing] = useState(false);
+  const [picked, setPicked] = useState<CardItem | null>(null);
+  const [imagesResp, setImagesResp] = useState<ImagesResp | null>(null);
+
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalSrc, setModalSrc] = useState("");
+
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+
+  const titleFiltersArr = useMemo(() => {
+    return titleFilter
+      .split(/[,\s]+/g)
+      .map((x) => x.trim())
+      .filter(Boolean);
+  }, [titleFilter]);
+
+  const extraPrefixArr = useMemo(() => {
+    return extraPrefix
+      .split(/[,\s]+/g)
+      .map((x) => x.trim())
+      .filter(Boolean);
+  }, [extraPrefix]);
+
+  function copy(text: string) {
+    navigator.clipboard.writeText(text);
+    toast.success("コピーしました！/ 已复制");
+  }
+
+  async function loadCards() {
+    setCardsLoading(true);
+    setCards([]);
+    setPicked(null);
+    setImagesResp(null);
+    try {
+      const u = new URL(`${API_BASE}/api/cards`);
+      u.searchParams.set("keyword", keyword);
+      u.searchParams.set("page_size", "80");
+      for (const f of titleFiltersArr) u.searchParams.append("title_filter", f);
+
+      const r = await fetch(u.toString());
+      const j = (await r.json()) as CardsResp;
+      setCards(j.results || []);
+      if ((j.results || []).length === 0) toast.info("结果为空：清空作品过滤再试 / フィルタを空にして再試行");
+      else toast.success(`小卡：${j.results.length} 件`);
+    } catch (e: any) {
+      toast.error(`检索失败：${e?.message || e}`);
+    } finally {
+      setCardsLoading(false);
+    }
+  }
+
+  async function probe(card: CardItem) {
+    setPicked(card);
+    setProbing(true);
+    setImagesResp(null);
+
+    try {
+      const u = new URL(`${API_BASE}/api/card_images`);
+      u.searchParams.set("card_url", card.url);
+      u.searchParams.set("max_images", String(maxImages));
+      for (const p of extraPrefixArr) u.searchParams.append("extra_prefix", p);
+
+      const r = await fetch(u.toString());
+      const j = (await r.json()) as ImagesResp;
+      setImagesResp(j);
+
+      setTimeout(() => {
+        resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 50);
+
+      const total =
+        (j.groups?.card_images?.images?.length || 0) +
+        (j.groups?.special_L_single?.images?.length || 0) +
+        (j.groups?.special_L_series?.images?.length || 0) +
+        (j.groups?.main_stills?.prefixes || []).reduce((a, x) => a + (x.images?.length || 0), 0) +
+        (j.groups?.rookie_stills?.prefixes || []).reduce((a, x) => a + (x.images?.length || 0), 0);
+
+      if (total === 0) {
+        toast.warning("没有探测到图片：可在“手动补prefix”填 2505114 等再试");
+      } else {
+        toast.success(`画像：${total} 枚`);
+      }
+    } catch (e: any) {
+      toast.error(`探图失败：${e?.message || e}`);
+    } finally {
+      setProbing(false);
+    }
+  }
+
+  useEffect(() => {
+    toast.info("流程：先检索小卡 → 再点探图（右侧自动出结果）");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const cardImgs = imagesResp?.groups?.card_images?.images || [];
+  const mainBlocks = imagesResp?.groups?.main_stills?.prefixes || [];
+  const rookieBlocks = imagesResp?.groups?.rookie_stills?.prefixes || [];
+  const unknownBlocks = imagesResp?.groups?.unknown_prefix_stills?.prefixes || [];
+  const specialSingle = imagesResp?.groups?.special_L_single?.images || [];
+  const specialL = imagesResp?.groups?.special_L_series?.images || [];
+
+  return (
+    <div className="min-h-screen bg-[radial-gradient(1200px_700px_at_20%_-10%,rgba(247,215,218,0.65),transparent_60%),radial-gradient(1000px_600px_at_80%_0%,rgba(244,214,200,0.55),transparent_55%),linear-gradient(180deg,#fffaf5,#ffffff)]">
+      <ToastContainer position="bottom-right" autoClose={1500} hideProgressBar />
+
+      <div className="mx-auto w-full max-w-6xl px-4 py-6 md:py-10">
+        <div className="rounded-2xl border border-black/10 bg-white/70 p-4 md:p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-xs text-black/55">API: {API_BASE}</div>
+              <h1 className="mt-1 text-[22px] md:text-[30px] font-extrabold tracking-tight text-[#111827]">
+                宝塚 ONLINE 画像探測ツール / 商品图探测工具
+              </h1>
+              <p className="mt-1 text-sm md:text-base text-black/60">
+                ① 小卡检索 → ② 探图（自动找：定妆・舞写 / 新人公演 / 特殊L）→ ③ 点击图片放大
+              </p>
+            </div>
+            <span className="inline-flex items-center gap-2 rounded-full border border-black/10 bg-white/70 px-3 py-1 text-xs text-black/70">
+              <Sparkles size={14} /> 中日双语 / 日本語+中文
+            </span>
+          </div>
+
+          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+            <label className="block">
+              <div className="text-xs font-semibold text-black/70">Keyword（种类 / 種類）</div>
+              <input
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-black/10 bg-white/80 px-3 py-2 text-sm outline-none focus:border-[#e7bcb5]"
+                placeholder="例：コレクションカード"
+              />
+            </label>
+
+            <label className="block md:col-span-2">
+              <div className="text-xs font-semibold text-black/70">作品过滤（可空 / 空でもOK）</div>
+              <input
+                value={titleFilter}
+                onChange={(e) => setTitleFilter(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-black/10 bg-white/80 px-3 py-2 text-sm outline-none focus:border-[#e7bcb5]"
+                placeholder="例：Goethe / ゲーテ / 阿修羅城"
+              />
+              <div className="mt-1 text-[11px] text-black/50">不敏感的话：先留空，再检索。</div>
+            </label>
+          </div>
+
+          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+            <label className="block">
+              <div className="text-xs font-semibold text-black/70">画像上限 / 上限</div>
+              <input
+                type="number"
+                value={maxImages}
+                min={1}
+                max={400}
+                onChange={(e) => setMaxImages(Number(e.target.value || 200))}
+                className="mt-1 w-full rounded-xl border border-black/10 bg-white/80 px-3 py-2 text-sm outline-none focus:border-[#e7bcb5]"
+              />
+              <div className="mt-1 text-[11px] text-black/50">建议 200</div>
+            </label>
+
+            <label className="block md:col-span-2">
+              <div className="text-xs font-semibold text-black/70">手动补 prefix（可空 / 空でもOK）</div>
+              <input
+                value={extraPrefix}
+                onChange={(e) => setExtraPrefix(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-black/10 bg-white/80 px-3 py-2 text-sm outline-none focus:border-[#e7bcb5]"
+                placeholder="例：2505114（新人公演等；多个用空格/逗号）"
+              />
+              <div className="mt-1 text-[11px] text-black/50">
+                一般不用填；当新人公演图不出时，再把你已知 prefix 粘进来重试。
+              </div>
+            </label>
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <button onClick={loadCards} className={cls(btn, btnPrimary)} disabled={cardsLoading}>
+              <Search size={16} />
+              {cardsLoading ? "检索中… / 検索中…" : "检索 / 検索"}
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-6 grid grid-cols-1 gap-5 md:grid-cols-2">
+          {/* Left */}
+          <div className={cardWrap}>
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-semibold text-[#111827]">小卡时间轴 / タイムライン</div>
+              <div className="text-xs text-black/50">{cards.length} 件</div>
+            </div>
+
+            {!cardsLoading && cards.length === 0 && (
+              <div className="mt-4 rounded-2xl border border-black/10 bg-white/60 p-4 text-sm text-black/60">
+                先点上方“检索”。如果结果为空：请清空“作品过滤”再试。
+              </div>
+            )}
+
+            {cardsLoading && (
+              <div className="mt-3 space-y-3">
+                {Array.from({ length: 7 }).map((_, i) => (
+                  <div key={i} className="rounded-2xl border border-black/10 bg-white/60 p-4 animate-pulse">
+                    <div className="h-4 w-2/3 rounded bg-black/10" />
+                    <div className="mt-2 h-3 w-1/2 rounded bg-black/10" />
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!cardsLoading && cards.length > 0 && (
+              <div className="mt-3 space-y-3">
+                {cards.map((c) => {
+                  const isPicked = picked?.code === c.code;
+                  return (
+                    <div
+                      key={c.code}
+                      className={cls(
+                        "rounded-2xl border bg-white/75 p-4 transition",
+                        isPicked ? "border-[#e7bcb5] shadow-lg" : "border-black/10 hover:shadow-md"
+                      )}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <TroupeBadge troupe={c.troupe || null} />
+                            {c.date && <span className="text-xs font-semibold text-black/60">{c.date}</span>}
+                          </div>
+                          <div className="mt-2 text-sm font-semibold text-[#111827] truncate">
+                            {c.title || "（标题未取到 / タイトル不明）"}
+                          </div>
+                          <div className="mt-1 text-xs text-black/50 truncate">code: {c.code}</div>
+                          {c.prefix && <div className="mt-1 text-xs text-black/45">prefix: {c.prefix}</div>}
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <button className={cls(btn, btnGhost, "px-3 py-1.5 text-xs")} onClick={() => copy(c.url)}>
+                              <ClipboardCopy size={14} /> URL
+                            </button>
+                            <a className={cls(btn, btnGhost, "px-3 py-1.5 text-xs")} href={c.url} target="_blank" rel="noreferrer">
+                              <ExternalLink size={14} /> 打开 / 開く
+                            </a>
+                          </div>
+                        </div>
+
+                        <button className={cls(btn, btnPrimary, "shrink-0")} onClick={() => probe(c)} disabled={probing}>
+                          <ImageIcon size={16} />
+                          {probing && isPicked ? "探图中…" : "探图"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Right */}
+          <div className={cardWrap}>
+            <div ref={resultsRef} className="flex items-center justify-between">
+              <div className="text-sm font-semibold text-[#111827]">探图结果 / 探図結果</div>
+              <div className="text-xs text-black/50">{picked ? "已选择 / 選択済" : "未选择 / 未選択"}</div>
+            </div>
+
+            {!picked && (
+              <div className="mt-4 rounded-2xl border border-black/10 bg-white/60 p-4 text-sm text-black/60">
+                左侧点“探图”即可。<br />（若新人公演不出图：把你已知 prefix 如 2505114 粘进“手动补prefix”再探图）
+              </div>
+            )}
+
+            {picked && probing && (
+              <div className="mt-4 rounded-2xl border border-black/10 bg-white/60 p-4">
+                <div className="text-sm font-semibold text-[#111827]">正在探测中… / 探索中…</div>
+                <div className="mt-2 text-xs text-black/60">
+                  会自动尝试：S/prefix-NNN（普通舞写）+ L/code（特殊）+ 候选prefix扩展（新人公演）
+                </div>
+              </div>
+            )}
+
+            {picked && !probing && imagesResp && (
+              <div className="mt-4 space-y-5">
+                <div className="rounded-2xl border border-black/10 bg-white/70 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <TroupeBadge troupe={imagesResp.troupe || null} />
+                    {imagesResp.base_date && <span className="text-xs font-semibold text-black/60">基准：{imagesResp.base_date}</span>}
+                  </div>
+                  <div className="mt-2 text-sm font-semibold text-[#111827]">{imagesResp.title || "（标题未取到）"}</div>
+                  <div className="mt-1 text-xs text-black/50 break-all">{imagesResp.card_url}</div>
+                  {imagesResp.prefix_from_code && (
+                    <div className="mt-1 text-xs text-black/45">prefix_from_code: {imagesResp.prefix_from_code}</div>
+                  )}
+                </div>
+
+                <Section
+                  title="小卡画像 / 小卡画像"
+                  hint="商品页可直接拿到的图片（以及 L/code 单图）"
+                  images={cardImgs}
+                  onOpen={(u) => (setModalSrc(u), setModalOpen(true))}
+                  onCopy={copy}
+                />
+
+                <PrefixSection
+                  title="定妆・舞写 / 定妆・舞写（S/prefix-NNN）"
+                  blocks={mainBlocks}
+                  onOpen={(u) => (setModalSrc(u), setModalOpen(true))}
+                  onCopy={copy}
+                />
+
+                <PrefixSection
+                  title="新人公演（候补）/ 新人公演（候補）"
+                  blocks={rookieBlocks}
+                  onOpen={(u) => (setModalSrc(u), setModalOpen(true))}
+                  onCopy={copy}
+                />
+
+                {unknownBlocks.length > 0 && (
+                  <PrefixSection
+                    title="不明prefix命中 / 不明prefix"
+                    blocks={unknownBlocks}
+                    onOpen={(u) => (setModalSrc(u), setModalOpen(true))}
+                    onCopy={copy}
+                  />
+                )}
+
+                <Section
+                  title="特殊画像：L/code 单图 / L/code"
+                  hint="特殊定妆・舞写：/img/goods/L/{code}.jpg"
+                  images={specialSingle}
+                  onOpen={(u) => (setModalSrc(u), setModalOpen(true))}
+                  onCopy={copy}
+                />
+
+                <Section
+                  title="特殊画像：L/stem+suffix 系列 / L連番"
+                  hint="极少数公演：/img/goods/L/{stem}{suffix}.jpg（例如 ...0229.jpg）"
+                  images={specialL}
+                  onOpen={(u) => (setModalSrc(u), setModalOpen(true))}
+                  onCopy={copy}
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <Modal open={modalOpen} onClose={() => setModalOpen(false)} src={modalSrc} title={imagesResp?.title} />
     </div>
   );
 }
