@@ -1,1105 +1,621 @@
-import React, { useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import {
-  Search,
-  Image as ImageIcon,
-  Camera,
-  Link2,
-  Loader2,
-  ChevronRight,
-  Sparkles,
-  RefreshCw,
-  Target,
-} from 'lucide-react'
-import { ToastContainer, toast } from 'react-toastify'
-import 'react-toastify/dist/ReactToastify.css'
+import React, { useEffect, useMemo, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Search, Image as ImageIcon, Link as LinkIcon, X, Loader2 } from "lucide-react";
+import { ToastContainer, toast } from "react-toastify";
+import "react-toastify/dist/ReactToastify.css";
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000'
+type CardItem = { url: string; code: string };
+type CardSearchResp = { keyword: string; title_filter: string[]; results: CardItem[]; error?: string; message?: string };
 
-type TabKey = 'steel' | 'program' | 'bulk' | 'probe'
+type CardImagesResp = {
+  card_url: string;
+  code: string;
+  prefix_candidates: string[];
+  picked_prefix: string | null;
+  images: string[];
+  error?: string;
+  message?: string;
+};
 
-interface ProgramRow {
-  title?: string
-  price?: string
-  release_date?: string
-  url?: string
-  code?: string
-  venue_group?: string
+const TABS = [
+  { key: "cards", label: "スチール写真リンク推測 / 定妆・舞写 링크推测" },
+  { key: "program", label: "公演プログラム / 场刊检索" },
+  { key: "batch", label: "公演名一括 / 批量检索" },
+] as const;
+
+type TabKey = typeof TABS[number]["key"];
+
+function cx(...cls: Array<string | false | undefined | null>) {
+  return cls.filter(Boolean).join(" ");
 }
 
-interface BroRow {
-  title?: string
-  url?: string
-  code?: string
-  ok?: boolean
+function safeJson<T = any>(x: any): T {
+  return x as T;
 }
 
-interface ProgramResponse {
-  year: number
-  queries: string[]
-  results: ProgramRow[]
-}
+export default function App() {
+  const [tab, setTab] = useState<TabKey>("cards");
 
-interface BroResponse {
-  prefix: string
-  results: BroRow[]
-}
+  // ✅ 强制你能看见现在请求的后端 base，避免“以为本地其实线上”
+  const apiBase = useMemo(() => {
+    // 你可改成 VITE_API_BASE；本地默认 127.0.0.1:8000
+    const envBase = (import.meta as any).env?.VITE_API_BASE as string | undefined;
+    return (envBase && envBase.trim()) ? envBase.trim().replace(/\/+$/, "") : "http://127.0.0.1:8000";
+  }, []);
 
-interface CodeProbeRow {
-  code: string
-  page_ok: boolean
-  img_ok: boolean
-  page_url: string
-  img_url: string
-}
+  // ============ Cards (定妆/舞写) ============
+  const [keyword, setKeyword] = useState("コレクションカード");
+  const [titleFilter, setTitleFilter] = useState(""); // 用户输入：例如 Goethe / ゲーテ / 花組
+  const [cardsLoading, setCardsLoading] = useState(false);
+  const [cards, setCards] = useState<CardItem[]>([]);
+  const [pickedCard, setPickedCard] = useState<CardItem | null>(null);
 
-interface CodeProbeResponse {
-  prefix: string
-  range: { min: number; max: number }
-  results: CodeProbeRow[]
-}
+  const [imagesLoading, setImagesLoading] = useState(false);
+  const [cardImages, setCardImages] = useState<CardImagesResp | null>(null);
 
-// 从程序册 / スチール链接中提取数字编码，例如 "https://.../g/g672176/" → "672176"
-function extractCodeFromUrl(url?: string | null): string | null {
-  if (!url) return null
-  const m = url.match(/\/g\/g(\d+)\//)
-  return m ? m[1] : null
-}
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [lightboxUrl, setLightboxUrl] = useState<string>("");
 
-// 根据编码构造图片地址，index=1 就是 _01.jpg
-function buildImageUrl(code: string, index = 1): string {
-  const idx = String(index).padStart(2, '0')
-  return `https://shop.tca-pictures.net/shop/itemimages/${code}_${idx}.jpg`
-}
+  // ============ Program ============
+  const [programYear, setProgramYear] = useState(2025);
+  const [programQ, setProgramQ] = useState("花組");
+  const [programLoading, setProgramLoading] = useState(false);
+  const [programRows, setProgramRows] = useState<any[]>([]);
 
-const tabs: { key: TabKey; labelJa: string; labelCn: string; icon: React.ReactNode }[] = [
-  {
-    key: 'steel',
-    labelJa: 'スチール写真リンク推測',
-    labelCn: 'スチール写真链接推测',
-    icon: <Camera className="w-4 h-4" />,
-  },
-  {
-    key: 'program',
-    labelJa: '公演プログラム',
-    labelCn: '场刊检索',
-    icon: <ImageIcon className="w-4 h-4" />,
-  },
-  {
-    key: 'bulk',
-    labelJa: '公演名一括',
-    labelCn: '批量检索',
-    icon: <Search className="w-4 h-4" />,
-  },
-  {
-    key: 'probe',
-    labelJa: 'コード範囲探測',
-    labelCn: 'CODE 区间探测',
-    icon: <Target className="w-4 h-4" />,
-  },
-]
+  // ============ Batch ============
+  const [batchInput, setBatchInput] = useState("Goethe\n悪魔城ドラキュラ\nJubilee");
+  const [batchLoading, setBatchLoading] = useState(false);
+  const [batchResults, setBatchResults] = useState<Record<string, any[]>>({});
 
-function App() {
-  const [activeTab, setActiveTab] = useState<TabKey>('program')
+  async function fetchJson(url: string) {
+    const r = await fetch(url, { method: "GET" });
+    const t = await r.text();
+    try {
+      return JSON.parse(t);
+    } catch {
+      return { error: "invalid_json", message: t };
+    }
+  }
 
-  // 公演プログラム
-  const [programYear, setProgramYear] = useState<number>(2025)
-  const [programKeyword, setProgramKeyword] = useState<string>('花組')
-  const [programLoading, setProgramLoading] = useState<boolean>(false)
-  const [programResults, setProgramResults] = useState<ProgramRow[]>([])
+  async function runCardSearch() {
+    setCardsLoading(true);
+    setCards([]);
+    setPickedCard(null);
+    setCardImages(null);
 
-  // スチール（BRO）
-  const [broPrefix, setBroPrefix] = useState<string>('2251101300')
-  const [broSsMin, setBroSsMin] = useState<number>(1)
-  const [broSsMax, setBroSsMax] = useState<number>(40)
-  const [broLoading, setBroLoading] = useState<boolean>(false)
-  const [broResults, setBroResults] = useState<BroRow[]>([])
-  const [broLastRange, setBroLastRange] = useState<{ min: number; max: number } | null>(null)
+    try {
+      // ✅ title_filter 支持多词（空格分隔）；后端是“宽松 any-hit”
+      const filters = titleFilter
+        .split(/\s+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
 
-  // 公演名一括
-  const [bulkYear, setBulkYear] = useState<number>(2025)
-  const [bulkNames, setBulkNames] = useState<string>('悪魔城ドラキュラ\nGUYS AND DOLLS')
-  const [bulkLoading, setBulkLoading] = useState<boolean>(false)
-  const [bulkResults, setBulkResults] = useState<ProgramRow[]>([])
+      const params = new URLSearchParams();
+      params.set("keyword", keyword);
+      // 多值 query：title_filter=a&title_filter=b
+      filters.forEach((f) => params.append("title_filter", f));
 
-  // CODE 区间探测
-  const [probePrefix, setProbePrefix] = useState<string>('6742')
-  const [probeMin, setProbeMin] = useState<number>(10)
-  const [probeMax, setProbeMax] = useState<number>(40)
-  const [probeLoading, setProbeLoading] = useState<boolean>(false)
-  const [probeResults, setProbeResults] = useState<CodeProbeRow[]>([])
-  const [probeLastRange, setProbeLastRange] = useState<{ min: number; max: number } | null>(null)
+      const url = `${apiBase}/api/cards?${params.toString()}`;
+      const data = safeJson<CardSearchResp>(await fetchJson(url));
 
-  // 大图 modal
-  const [modalImage, setModalImage] = useState<string | null>(null)
-  const [modalTitle, setModalTitle] = useState<string>('')
+      const arr = Array.isArray(data?.results) ? data.results : [];
+      setCards(arr);
 
-  const apiGet = async (path: string, params: Record<string, string | number | string[] | undefined>) => {
-    const qs = new URLSearchParams()
-    Object.entries(params).forEach(([k, v]) => {
-      if (v === undefined || v === null || v === '') return
-      if (k === 'q' && Array.isArray(v)) {
-        v.forEach((val) => qs.append('q', String(val)))
-      } else {
-        qs.set(k, String(v))
+      if (data?.error) toast.error(`検索失敗: ${data.error}`);
+      if (arr.length === 0) toast.info("结果为空：请尝试清空过滤词或换成 ゲーテ / 花組");
+    } catch (e: any) {
+      toast.error(`搜索失败：${String(e)}`);
+    } finally {
+      setCardsLoading(false);
+    }
+  }
+
+  async function runGetImages(card: CardItem) {
+    setPickedCard(card);
+    setImagesLoading(true);
+    setCardImages(null);
+
+    try {
+      const url = `${apiBase}/api/card_images?card_url=${encodeURIComponent(card.url)}`;
+      const data = safeJson<CardImagesResp>(await fetchJson(url));
+      setCardImages(data);
+
+      if (data?.error) toast.error(`画像取得失敗: ${data.error}`);
+      if ((data?.images ?? []).length === 0) toast.info("无图：可能图片尚未生成，或前缀推导失败（可稍后再试）");
+      else toast.success(`取得 ${data.images.length} 张`);
+    } catch (e: any) {
+      toast.error(`画像取得失败：${String(e)}`);
+    } finally {
+      setImagesLoading(false);
+    }
+  }
+
+  function copy(text: string) {
+    navigator.clipboard.writeText(text).then(() => toast.success("コピーしました / 已复制"));
+  }
+
+  async function runProgramSearch() {
+    setProgramLoading(true);
+    setProgramRows([]);
+    try {
+      const params = new URLSearchParams();
+      params.set("year", String(programYear));
+      // q 支持多词：用空格拆成多个 q=
+      programQ
+        .split(/\s+/)
+        .map((x) => x.trim())
+        .filter(Boolean)
+        .forEach((x) => params.append("q", x));
+
+      const url = `${apiBase}/api/program?${params.toString()}`;
+      const data = await fetchJson(url);
+      const arr = Array.isArray(data?.results) ? data.results : [];
+      setProgramRows(arr);
+      if (arr.length === 0) toast.info("没有结果：换关键词试试（如 花組 / 雪組 / Goethe）");
+    } catch (e: any) {
+      toast.error(`检索失败：${String(e)}`);
+    } finally {
+      setProgramLoading(false);
+    }
+  }
+
+  async function runBatchSearch() {
+    setBatchLoading(true);
+    setBatchResults({});
+    try {
+      const lines = batchInput
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      const out: Record<string, any[]> = {};
+      for (const line of lines) {
+        const params = new URLSearchParams();
+        params.set("year", "2025");
+        line.split(/\s+/).filter(Boolean).forEach((x) => params.append("q", x));
+        const url = `${apiBase}/api/program?${params.toString()}`;
+        const data = await fetchJson(url);
+        out[line] = Array.isArray(data?.results) ? data.results : [];
       }
-    })
-    const url = `${API_BASE}${path}?${qs.toString()}`
-    const res = await fetch(url)
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`)
-    }
-    return res.json()
-  }
-
-  // 公演プログラム检索
-  const handleProgramSearch = async () => {
-    try {
-      setProgramLoading(true)
-      const json: ProgramResponse = await apiGet('/api/program', {
-        year: programYear,
-        q: programKeyword.trim() || undefined,
-      })
-      setProgramResults(json.results || [])
-      toast.success('公演プログラムを取得しました / 场刊结果已更新')
-    } catch (e) {
-      console.error(e)
-      toast.error('取得に失敗しました / 获取失败')
+      setBatchResults(out);
+      toast.success("批量检索完成");
+    } catch (e: any) {
+      toast.error(`批量失败：${String(e)}`);
     } finally {
-      setProgramLoading(false)
+      setBatchLoading(false);
     }
   }
 
-  // スチール照片链接推测（BRO）
-  const handleBroSearch = async () => {
-    if (!broPrefix.trim()) {
-      toast.info('プレフィックスを入力してください / 请输入前缀')
-      return
-    }
-    try {
-      setBroLoading(true)
-      setBroLastRange({ min: broSsMin, max: broSsMax })
-      const json: BroResponse = await apiGet('/api/bro', {
-        prefix: broPrefix.trim(),
-        ss_min: broSsMin,
-        ss_max: broSsMax,
-      })
-      setBroResults(json.results || [])
-      toast.success('スチール候補を取得しました / スチール候选已更新')
-    } catch (e) {
-      console.error(e)
-      toast.error('取得に失敗しました / 获取失败')
-    } finally {
-      setBroLoading(false)
-    }
-  }
-
-  // 公演名一括 / 批量检索
-  const handleBulkSearch = async () => {
-    const lines = bulkNames
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean)
-    if (!lines.length) {
-      toast.info('公演名を入力してください / 请输入公演名称')
-      return
-    }
-    try {
-      setBulkLoading(true)
-      const json: ProgramResponse = await apiGet('/api/program', {
-        year: bulkYear,
-        q: lines,
-      })
-      setBulkResults(json.results || [])
-      toast.success('公演名で一括検索しました / 批量检索完成')
-    } catch (e) {
-      console.error(e)
-      toast.error('取得に失敗しました / 获取失败')
-    } finally {
-      setBulkLoading(false)
-    }
-  }
-
-  // CODE 区间探测
-  const handleProbeSearch = async () => {
-    if (!probePrefix.trim()) {
-      toast.info('プレフィックスを入力してください / 请输入 CODE 前缀')
-      return
-    }
-    if (probeMax < probeMin) {
-      toast.info('終了番号は開始番号以上である必要があります / 结束号需大于等于起始号')
-      return
-    }
-    try {
-      setProbeLoading(true)
-      setProbeLastRange({ min: probeMin, max: probeMax })
-      const json: CodeProbeResponse = await apiGet('/api/code_probe', {
-        prefix: probePrefix.trim(),
-        ss_min: probeMin,
-        ss_max: probeMax,
-      })
-      setProbeResults(json.results || [])
-      toast.success('コード範囲の探測が完了しました / CODE 区间探测完成')
-    } catch (e) {
-      console.error(e)
-      toast.error('取得に失敗しました / 获取失败')
-    } finally {
-      setProbeLoading(false)
-    }
-  }
-
-  const renderImageCell = (row: { url?: string; code?: string; title?: string }) => {
-    const code = row.code && row.code.length > 0 ? row.code : extractCodeFromUrl(row.url)
-    if (!code) {
-      return <span className="text-xs text-gray-400">无图 / no image</span>
-    }
-    const imgUrl = buildImageUrl(code, 1)
-    return (
-      <div className="flex flex-col items-start gap-1">
-        <button
-          type="button"
-          onClick={() => {
-            setModalImage(imgUrl)
-            setModalTitle(row.title || code)
-          }}
-          className="text-xs md:text-sm text-blue-600 hover:underline inline-flex items-center gap-1"
-        >
-          <ImageIcon className="w-3 h-3" />
-          画像を開く / Open image
-        </button>
-        <img
-          src={imgUrl}
-          alt={row.title || code}
-          className="w-16 h-24 md:w-20 md:h-28 object-cover rounded border border-gray-200 cursor-zoom-in"
-          loading="lazy"
-          onClick={() => {
-            setModalImage(imgUrl)
-            setModalTitle(row.title || code)
-          }}
-          onError={(e) => {
-            e.currentTarget.style.display = 'none'
-          }}
-        />
-      </div>
-    )
-  }
-
-  const steelProgress =
-    broLastRange && broLastRange.max >= broLastRange.min
-      ? Math.min(
-          100,
-          Math.round(
-            (broResults.length / (broLastRange.max - broLastRange.min + 1 || 1)) * 100,
-          ),
-        )
-      : 0
-
-  const probeProgress =
-    probeLastRange && probeLastRange.max >= probeLastRange.min
-      ? Math.min(
-          100,
-          Math.round(
-            (probeResults.length /
-              (probeLastRange.max - probeLastRange.min + 1 || 1)) * 100,
-          ),
-        )
-      : 0
+  useEffect(() => {
+    // 首次提示当前 API base
+    toast.info(`API Base: ${apiBase}`, { autoClose: 2500 });
+  }, [apiBase]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-[#f9fafb] via-[#fef9f7] to-[#fdf6ff] text-[#111827]">
-      {/* Header */}
-      <header className="border-b border-[#e5e7eb]/80 bg-white/70 backdrop-blur-md sticky top-0 z-20">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-full bg-gradient-to-br from-pink-300 via-rose-200 to-amber-200 border border-white shadow-md flex items-center justify-center">
-              <Sparkles className="w-5 h-5 text-[#1f2937]" />
+    <div className="min-h-screen bg-[#fffaf5]">
+      <ToastContainer position="bottom-right" theme="light" />
+
+      {/* 顶部：更像 shop.tca-pictures 的清爽白底 + 轻微渐变 */}
+      <header className="sticky top-0 z-20 bg-white/80 backdrop-blur border-b border-black/5">
+        <div className="mx-auto max-w-6xl px-4 py-3 flex items-center justify-between">
+          <div className="flex flex-col">
+            <div className="text-[18px] md:text-[20px] font-semibold tracking-tight text-[#1f2328]">
+              Takarazuka Link Finder
+              <span className="ml-2 text-[12px] font-normal text-[#6b7280]">宝塚 ONLINE 商品 링크 탐색</span>
             </div>
-            <div>
-              <h1 className="text-[18px] md:text-[20px] font-semibold tracking-wide text-[#111827]">
-                Takarazuka Link Finder
-              </h1>
-              <p className="text-xs md:text-[13px] text-[#6b7280]">
-                宝塚 ONLINE 商品リンク & 画像パターン探索 / 在线商品链接 & 图片模式探测器
-              </p>
+            <div className="text-[12px] text-[#6b7280] mt-0.5">
+              API: <span className="font-mono">{apiBase}</span>
             </div>
           </div>
-          <div className="hidden md:flex flex-col items-end text-[11px] text-[#6b7280]">
-            <span>Backend: {API_BASE}</span>
-            <span className="flex items-center gap-1">
-              <RefreshCw className="w-3 h-3" />
-              If no result, check API_BASE settings.
-            </span>
-          </div>
+
+          <nav className="flex items-center gap-2">
+            {TABS.map((t) => (
+              <button
+                key={t.key}
+                onClick={() => setTab(t.key)}
+                className={cx(
+                  "px-3 py-2 rounded-xl text-[12px] md:text-[13px] transition",
+                  tab === t.key
+                    ? "bg-[#0f172a] text-white shadow"
+                    : "bg-[#f7f7f7] text-[#111827] hover:bg-[#efefef]"
+                )}
+              >
+                {t.label}
+              </button>
+            ))}
+          </nav>
         </div>
       </header>
 
-      {/* Main */}
-      <main className="max-w-6xl mx-auto px-4 pb-12 pt-5">
-        {/* Tabs */}
-        <div className="mb-4">
-          <div className="inline-flex rounded-full bg-white/70 backdrop-blur border border-[#e5e7eb] p-1 shadow-sm">
-            {tabs.map((t) => (
-              <button
-                key={t.key}
-                onClick={() => setActiveTab(t.key)}
-                className={`px-3 md:px-4 py-1.5 md:py-2 rounded-full text-[11px] md:text-[13px] flex items-center gap-1.5 transition-all ${
-                  activeTab === t.key
-                    ? 'bg-gradient-to-r from-pink-100 to-amber-100 text-[#111827] shadow-sm'
-                    : 'text-[#6b7280] hover:text-[#111827]'
-                }`}
-              >
-                {t.icon}
-                <span className="hidden md:inline">
-                  {t.labelJa} / {t.labelCn}
-                </span>
-                <span className="md:hidden">{t.labelJa}</span>
-              </button>
-            ))}
-          </div>
-        </div>
+      {/* 背景纹理/渐变（不惨白） */}
+      <div className="pointer-events-none fixed inset-0 -z-10">
+        <div className="absolute inset-0 bg-gradient-to-b from-[#fffaf5] via-white to-[#fff1f2]" />
+        <div className="absolute -top-32 right-[-120px] h-[320px] w-[320px] rounded-full bg-[#f9a8d4]/25 blur-3xl" />
+        <div className="absolute top-[240px] left-[-140px] h-[360px] w-[360px] rounded-full bg-[#93c5fd]/18 blur-3xl" />
+      </div>
 
-        <AnimatePresence mode="wait">
-          {/* スチール写真链接推测 */}
-          {activeTab === 'steel' && (
-            <motion.section
-              key="steel"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.18 }}
-              className="space-y-4"
-            >
-              {/* 说明 */}
-              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-4 md:p-5 flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                  <Camera className="w-4 h-4 text-pink-500" />
-                  <h2 className="text-[15px] md:text-[16px] font-semibold text-[#111827]">
-                    スチール写真リンク推測 / スチール写真链接推测
-                  </h2>
+      <main className="mx-auto max-w-6xl px-4 py-6">
+        {tab === "cards" && (
+          <section className="space-y-4">
+            <Card>
+              <CardHeader
+                title="スチール写真リンク推測 / 定妆・舞写 링크推测"
+                subtitle="① 先从搜索页抓「小卡」商品链接 ② 再用小卡 code 推导图片序列（S/{prefix}-{NNN}.jpg）"
+              />
+              <div className="grid md:grid-cols-3 gap-3">
+                <Field label="搜索关键词 / Keyword（建议默认）">
+                  <input
+                    value={keyword}
+                    onChange={(e) => setKeyword(e.target.value)}
+                    className="w-full rounded-xl border border-black/10 bg-white px-3 py-2 text-[14px] focus:outline-none focus:ring-2 focus:ring-[#0f172a]/20"
+                    placeholder="例：コレクションカード"
+                  />
+                </Field>
+
+                <Field label="作品过滤 / Title filter（可留空）">
+                  <input
+                    value={titleFilter}
+                    onChange={(e) => setTitleFilter(e.target.value)}
+                    className="w-full rounded-xl border border-black/10 bg-white px-3 py-2 text-[14px] focus:outline-none focus:ring-2 focus:ring-[#0f172a]/20"
+                    placeholder="例：ゲーテ / 花組 / GOETHE（空格可多词）"
+                  />
+                </Field>
+
+                <div className="flex items-end">
+                  <button
+                    onClick={runCardSearch}
+                    className="w-full rounded-xl bg-[#0f172a] text-white px-3 py-2 text-[14px] font-medium hover:opacity-95 active:opacity-90 flex items-center justify-center gap-2 shadow"
+                    disabled={cardsLoading}
+                  >
+                    {cardsLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                    検索 / 搜索
+                  </button>
                 </div>
-                <p className="text-[12px] md:text-[13px] text-[#4b5563] leading-relaxed">
-                  BRO（スチール写真）の商品コード前半
-                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded ml-1 mr-1">
-                    2251101300
-                  </span>
-                  などをプレフィックスとして指定し、
-                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
-                    _01 ～ _40
-                  </span>
-                  の候補を一括でチェックします。結果から
-                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
-                    itemimages/&lt;CODE&gt;_01.jpg
-                  </span>
-                  を自動組み立てて画像を表示します。
-                </p>
               </div>
 
-              {/* 表单 */}
-              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-4 md:p-5 space-y-3">
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
-                  <div className="md:col-span-2">
-                    <label className="block text-[11px] md:text-[12px] text-[#6b7280] mb-1">
-                      プレフィックス / 前缀 (例: 2251101300)
-                    </label>
-                    <input
-                      value={broPrefix}
-                      onChange={(e) => setBroPrefix(e.target.value)}
-                      className="w-full rounded-xl border border-[#e5e7eb] bg-white/70 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-pink-200 focus:border-pink-400 font-mono"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] md:text-[12px] text-[#6b7280] mb-1">
-                      開始番号 / 起始号 (ss_min)
-                    </label>
-                    <input
-                      type="number"
-                      value={broSsMin}
-                      onChange={(e) => setBroSsMin(Number(e.target.value) || 1)}
-                      className="w-full rounded-xl border border-[#e5e7eb] bg-white/70 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-pink-200 focus:border-pink-400"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] md:text-[12px] text-[#6b7280] mb-1">
-                      終了番号 / 结束号 (ss_max)
-                    </label>
-                    <input
-                      type="number"
-                      value={broSsMax}
-                      onChange={(e) => setBroSsMax(Number(e.target.value) || 40)}
-                      className="w-full rounded-xl border border-[#e5e7eb] bg-white/70 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-pink-200 focus:border-pink-400"
-                    />
-                  </div>
-                </div>
+              <div className="mt-4 text-[12px] text-[#6b7280] leading-relaxed">
+                <div>Tips：</div>
+                <ul className="list-disc pl-5 space-y-1">
+                  <li>过滤词不要堆太多；建议优先试「ゲーテ」「花組」。</li>
+                  <li>若能看到小卡列表但取不到图：可能图片尚未生成，或 prefix 推导需要等官网生成后再试。</li>
+                </ul>
+              </div>
+            </Card>
 
-                <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <button
-                    type="button"
-                    onClick={handleBroSearch}
-                    disabled={broLoading}
-                    className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 text-white text-[13px] px-4 py-2 shadow-md hover:shadow-lg active:scale-[0.98] transition disabled:opacity-60"
-                  >
-                    {broLoading ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        検索中… / 检索中…
-                      </>
-                    ) : (
-                      <>
-                        <Search className="w-4 h-4" />
-                        スチール候補を検索 / 搜索候选
-                      </>
-                    )}
-                  </button>
+            <div className="grid lg:grid-cols-2 gap-4">
+              <Card>
+                <CardHeader title="小卡结果 / Card results" subtitle={`共 ${cards.length} 件`} />
+                <div className="space-y-2 max-h-[520px] overflow-auto pr-1">
+                  {cardsLoading && <SkeletonList />}
 
-                  {broLastRange && (
-                    <div className="flex-1 min-w-[200px]">
-                      <div className="flex items-center justify-between text-[11px] text-[#6b7280] mb-1">
-                        <span>探索进度 / Scan progress</span>
-                        <span>
-                          {broResults.length} /{' '}
-                          {broLastRange.max - broLastRange.min + 1 || 1}
-                        </span>
+                  {!cardsLoading && cards.length === 0 && (
+                    <Empty>
+                      没有结果。你刚才贴的接口明明有 results 的话，说明前端请求的 API base 可能不是本地。
+                      <div className="mt-2 text-[12px] text-[#6b7280]">
+                        现在 UI 显示的 API base 是：<span className="font-mono">{apiBase}</span>
                       </div>
-                      <div className="w-full h-2 rounded-full bg-[#f3f4f6] overflow-hidden">
-                        <div
-                          className="h-2 bg-gradient-to-r from-pink-400 to-amber-400 transition-all"
-                          style={{ width: `${steelProgress}%` }}
-                        />
-                      </div>
-                    </div>
+                    </Empty>
                   )}
-                </div>
-              </div>
 
-              {/* 结果 */}
-              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-3 md:p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-[14px] md:text-[15px] font-semibold text-[#111827] flex items-center gap-2">
-                    <Link2 className="w-4 h-4 text-pink-500" />
-                    検索結果 / 检索结果
-                  </h3>
-                  <span className="text-[11px] text-[#6b7280]">
-                    {broResults.length} ヒット / 条
-                  </span>
+                  {!cardsLoading &&
+                    cards.map((c) => (
+                      <div key={c.url} className="rounded-2xl border border-black/10 bg-white p-3 hover:shadow-sm transition">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-[13px] text-[#111827] font-medium truncate">{c.code}</div>
+                            <div className="text-[12px] text-[#6b7280] break-all mt-1">{c.url}</div>
+                          </div>
+                          <div className="flex gap-2 shrink-0">
+                            <button
+                              className="rounded-xl px-3 py-2 text-[12px] bg-[#f7f7f7] hover:bg-[#efefef] border border-black/5 flex items-center gap-1"
+                              onClick={() => copy(c.url)}
+                            >
+                              <LinkIcon className="h-4 w-4" /> URL
+                            </button>
+                            <button
+                              className="rounded-xl px-3 py-2 text-[12px] bg-[#0f172a] text-white hover:opacity-95 flex items-center gap-1"
+                              onClick={() => runGetImages(c)}
+                            >
+                              <ImageIcon className="h-4 w-4" /> 画像
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
                 </div>
-                {broResults.length === 0 ? (
-                  <p className="text-[12px] text-[#9ca3af]">
-                    まだ結果がありません。上でプレフィックスを入力して検索してみてください。
-                    / 暂无结果，请先在上方输入前缀进行检索。
-                  </p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full text-[12px] md:text-[13px]">
-                      <thead>
-                        <tr className="border-b border-[#e5e7eb] bg-[#f9fafb]">
-                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
-                            CODE
-                          </th>
-                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
-                            リンク / 链接
-                          </th>
-                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
-                            画像 / Image
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {broResults.map((row, idx) => (
-                          <tr
-                            key={idx}
-                            className="border-b border-[#f3f4f6] hover:bg-pink-50/40 transition"
-                          >
-                            <td className="px-2 py-2 font-mono text-xs text-[#111827]">
-                              {row.code || extractCodeFromUrl(row.url) || '-'}
-                            </td>
-                            <td className="px-2 py-2 align-top">
-                              {row.url ? (
-                                <a
-                                  href={row.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="inline-flex items-center gap-1 text-blue-600 hover:underline break-all"
-                                >
-                                  <ChevronRight className="w-3 h-3" />
-                                  {row.url}
-                                </a>
-                              ) : (
-                                <span className="text-xs text-[#9ca3af]">-</span>
-                              )}
-                            </td>
-                            <td className="px-2 py-2 align-top">{renderImageCell(row)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+              </Card>
+
+              <Card>
+                <CardHeader
+                  title="画像 / Images"
+                  subtitle={
+                    pickedCard
+                      ? `选中：${pickedCard.code}`
+                      : "先在左侧点「画像」取得图片序列"
+                  }
+                />
+
+                {imagesLoading && (
+                  <div className="flex items-center gap-2 text-[13px] text-[#6b7280]">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    探测图片中…（可能需要几秒）
                   </div>
                 )}
-              </div>
-            </motion.section>
-          )}
 
-          {/* 公演プログラム / 场刊检索 */}
-          {activeTab === 'program' && (
-            <motion.section
-              key="program"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.18 }}
-              className="space-y-4"
-            >
-              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-4 md:p-5 flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                  <ImageIcon className="w-4 h-4 text-pink-500" />
-                  <h2 className="text-[15px] md:text-[16px] font-semibold text-[#111827]">
-                    公演プログラム / 场刊检索
-                  </h2>
-                </div>
-                <p className="text-[12px] md:text-[13px] text-[#4b5563] leading-relaxed">
-                  年度とキーワード（花組、作品名など）で
-                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
-                    cpro
-                  </span>
-                  配下の公演プログラムを検索し、
-                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
-                    gNNNNNN
-                  </span>
-                  から自動的に
-                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
-                    itemimages/NNNNNN_01.jpg
-                  </span>
-                  を推測して画像を表示します。
-                </p>
-              </div>
+                {!imagesLoading && !cardImages && <Empty>暂无图片。点击左侧某条的「画像」开始提取。</Empty>}
 
-              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-4 md:p-5 space-y-3">
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
-                  <div>
-                    <label className="block text-[11px] md:text-[12px] text-[#6b7280] mb-1">
-                      年度 / Year
-                    </label>
-                    <input
-                      type="number"
-                      value={programYear}
-                      onChange={(e) => setProgramYear(Number(e.target.value) || 2025)}
-                      className="w-full rounded-xl border border-[#e5e7eb] bg-white/70 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-pink-200 focus:border-pink-400"
-                    />
-                  </div>
-                  <div className="md:col-span-2">
-                    <label className="block text-[11px] md:text-[12px] text-[#6b7280] mb-1">
-                      キーワード / 关键字（花組、作品名…）
-                    </label>
-                    <input
-                      value={programKeyword}
-                      onChange={(e) => setProgramKeyword(e.target.value)}
-                      className="w-full rounded-xl border border-[#e5e7eb] bg-white/70 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-pink-200 focus:border-pink-400"
-                    />
-                  </div>
-                  <div>
-                    <button
-                      type="button"
-                      onClick={handleProgramSearch}
-                      disabled={programLoading}
-                      className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 text-white text-[13px] px-4 py-2.5 shadow-md hover:shadow-lg active:scale-[0.98] transition disabled:opacity-60"
-                    >
-                      {programLoading ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                          検索中… / 检索中…
-                        </>
-                      ) : (
-                        <>
-                          <Search className="w-4 h-4" />
-                          公演プログラム検索 / 搜索场刊
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-              </div>
+                {!imagesLoading && cardImages && (
+                  <div className="space-y-3">
+                    <div className="rounded-2xl border border-black/10 bg-white p-3">
+                      <div className="text-[12px] text-[#6b7280]">
+                        picked_prefix：
+                        <span className="ml-2 font-mono text-[#111827]">{String(cardImages.picked_prefix)}</span>
+                      </div>
+                      <div className="text-[12px] text-[#6b7280] mt-1">
+                        candidates：
+                        <span className="ml-2 font-mono">{(cardImages.prefix_candidates || []).join(", ") || "-"}</span>
+                      </div>
+                    </div>
 
-              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-3 md:p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-[14px] md:text-[15px] font-semibold text-[#111827] flex items-center gap-2">
-                    <Link2 className="w-4 h-4 text-pink-500" />
-                    検索結果 / 检索结果
-                  </h3>
-                  <span className="text-[11px] text-[#6b7280]">
-                    {programResults.length} ヒット / 条
-                  </span>
-                </div>
-                {programResults.length === 0 ? (
-                  <p className="text-[12px] text-[#9ca3af]">
-                    まだ結果がありません。年度とキーワードを指定して検索してください。
-                    / 暂无结果，请先输入年度和关键字进行检索。
-                  </p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full text-[12px] md:text-[13px]">
-                      <thead>
-                        <tr className="border-b border-[#e5e7eb] bg-[#f9fafb]">
-                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
-                            タイトル / 标题
-                          </th>
-                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
-                            リンク / 链接
-                          </th>
-                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
-                            画像 / Image
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {programResults.map((row, idx) => (
-                          <tr
-                            key={idx}
-                            className="border-b border-[#f3f4f6] hover:bg-pink-50/40 transition"
-                          >
-                            <td className="px-2 py-2 align-top">
-                              <div className="flex flex-col gap-1">
-                                <span className="text-[#111827]">
-                                  {row.title || '(No title)'}
-                                </span>
-                                <span className="text-[11px] text-[#9ca3af]">
-                                  {row.venue_group || '会場未分類 / Venue UNK'}
-                                </span>
-                              </div>
-                            </td>
-                            <td className="px-2 py-2 align-top">
-                              {row.url ? (
-                                <a
-                                  href={row.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="inline-flex items-center gap-1 text-blue-600 hover:underline break-all"
-                                >
-                                  <ChevronRight className="w-3 h-3" />
-                                  {row.url}
-                                </a>
-                              ) : (
-                                <span className="text-xs text-[#9ca3af]">-</span>
-                              )}
-                            </td>
-                            <td className="px-2 py-2 align-top">{renderImageCell(row)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            </motion.section>
-          )}
+                    <div className="grid grid-cols-3 md:grid-cols-4 gap-2">
+                      {(cardImages.images || []).map((img) => (
+                        <button
+                          key={img}
+                          className="group rounded-2xl overflow-hidden border border-black/10 bg-white hover:shadow-md transition"
+                          onClick={() => {
+                            setLightboxUrl(img);
+                            setLightboxOpen(true);
+                          }}
+                          title="点击放大 / Zoom"
+                        >
+                          <img src={img} alt="" className="w-full h-[96px] object-cover group-hover:scale-[1.03] transition" />
+                        </button>
+                      ))}
+                    </div>
 
-          {/* 公演名一括 / 批量检索 */}
-          {activeTab === 'bulk' && (
-            <motion.section
-              key="bulk"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.18 }}
-              className="space-y-4"
-            >
-              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-4 md:p-5 flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                  <Search className="w-4 h-4 text-pink-500" />
-                  <h2 className="text-[15px] md:text-[16px] font-semibold text-[#111827]">
-                    公演名一括 / 批量检索
-                  </h2>
-                </div>
-                <p className="text-[12px] md:text-[13px] text-[#4b5563] leading-relaxed">
-                  公演名を改行区切りで入力すると、
-                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
-                    /api/program
-                  </span>
-                  に対して
-                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
-                    q=公演1&amp;q=公演2…
-                  </span>
-                  で一括問い合わせを行い、
-                  結果のリンクから自動的に画像 URL を推測して表示します。
-                </p>
-              </div>
-
-              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-4 md:p-5 space-y-3">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-[11px] md:text-[12px] text-[#6b7280] mb-1">
-                      年度 / Year
-                    </label>
-                    <input
-                      type="number"
-                      value={bulkYear}
-                      onChange={(e) => setBulkYear(Number(e.target.value) || 2025)}
-                      className="w-full rounded-xl border border-[#e5e7eb] bg-white/70 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-pink-200 focus:border-pink-400"
-                    />
-                  </div>
-                  <div className="md:col-span-2">
-                    <label className="block text-[11px] md:text-[12px] text-[#6b7280] mb-1">
-                      公演名リスト / 公演名称列表（1 行 1 作品）
-                    </label>
-                    <textarea
-                      value={bulkNames}
-                      onChange={(e) => setBulkNames(e.target.value)}
-                      rows={4}
-                      className="w-full rounded-xl border border-[#e5e7eb] bg-white/70 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-pink-200 focus:border-pink-400"
-                      placeholder={`例：\n悪魔城ドラキュラ\nGUYS AND DOLLS\nGoethe（ゲーテ）!`}
-                    />
-                  </div>
-                </div>
-                <div className="flex justify-end">
-                  <button
-                    type="button"
-                    onClick={handleBulkSearch}
-                    disabled={bulkLoading}
-                    className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 text-white text-[13px] px-4 py-2.5 shadow-md hover:shadow-lg active:scale-[0.98] transition disabled:opacity-60"
-                  >
-                    {bulkLoading ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        一括検索中… / 批量检索中…
-                      </>
-                    ) : (
-                      <>
-                        <Search className="w-4 h-4" />
-                        公演名で一括検索 / 按公演名批量搜索
-                      </>
+                    {(cardImages.images || []).length > 0 && (
+                      <div className="text-[12px] text-[#6b7280]">
+                        点击缩略图放大；点击 URL 可复制。
+                        <div className="mt-2 space-y-1 max-h-[160px] overflow-auto rounded-2xl border border-black/10 bg-white p-3">
+                          {(cardImages.images || []).map((u) => (
+                            <div key={u} className="flex items-center justify-between gap-2">
+                              <div className="text-[12px] break-all">{u}</div>
+                              <button
+                                className="shrink-0 text-[12px] px-2 py-1 rounded-lg bg-[#f7f7f7] hover:bg-[#efefef]"
+                                onClick={() => copy(u)}
+                              >
+                                Copy
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
                     )}
+                  </div>
+                )}
+              </Card>
+            </div>
+          </section>
+        )}
+
+        {tab === "program" && (
+          <section className="space-y-4">
+            <Card>
+              <CardHeader
+                title="公演プログラム / 场刊检索"
+                subtitle="输入关键词（支持空格多词 AND），返回标题 + URL（不展示价格/发售日等字段）"
+              />
+              <div className="grid md:grid-cols-3 gap-3">
+                <Field label="年份 / Year">
+                  <input
+                    type="number"
+                    value={programYear}
+                    onChange={(e) => setProgramYear(Number(e.target.value || 2025))}
+                    className="w-full rounded-xl border border-black/10 bg-white px-3 py-2 text-[14px]"
+                  />
+                </Field>
+
+                <Field label="关键词 / Keywords（空格多词）">
+                  <input
+                    value={programQ}
+                    onChange={(e) => setProgramQ(e.target.value)}
+                    className="w-full rounded-xl border border-black/10 bg-white px-3 py-2 text-[14px]"
+                    placeholder="例：花組 Goethe"
+                  />
+                </Field>
+
+                <div className="flex items-end">
+                  <button
+                    onClick={runProgramSearch}
+                    className="w-full rounded-xl bg-[#0f172a] text-white px-3 py-2 text-[14px] font-medium hover:opacity-95 flex items-center justify-center gap-2"
+                    disabled={programLoading}
+                  >
+                    {programLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                    検索 / 搜索
                   </button>
                 </div>
               </div>
+            </Card>
 
-              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-3 md:p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-[14px] md:text-[15px] font-semibold text-[#111827] flex items-center gap-2">
-                    <Link2 className="w-4 h-4 text-pink-500" />
-                    検索結果 / 检索结果
-                  </h3>
-                  <span className="text-[11px] text-[#6b7280]">
-                    {bulkResults.length} ヒット / 条
-                  </span>
-                </div>
-                {bulkResults.length === 0 ? (
-                  <p className="text-[12px] text-[#9ca3af]">
-                    まだ結果がありません。公演名を入力して一括検索してください。
-                    / 暂无结果，请先输入公演名进行批量检索。
-                  </p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full text-[12px] md:text-[13px]">
-                      <thead>
-                        <tr className="border-b border-[#e5e7eb] bg-[#f9fafb]">
-                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
-                            タイトル / 标题
-                          </th>
-                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
-                            リンク / 链接
-                          </th>
-                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
-                            画像 / Image
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {bulkResults.map((row, idx) => (
-                          <tr
-                            key={idx}
-                            className="border-b border-[#f3f4f6] hover:bg-pink-50/40 transition"
-                          >
-                            <td className="px-2 py-2 align-top">
-                              <div className="flex flex-col gap-1">
-                                <span className="text-[#111827]">
-                                  {row.title || '(No title)'}
-                                </span>
-                              </div>
-                            </td>
-                            <td className="px-2 py-2 align-top">
-                              {row.url ? (
-                                <a
-                                  href={row.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="inline-flex items-center gap-1 text-blue-600 hover:underline break-all"
-                                >
-                                  <ChevronRight className="w-3 h-3" />
-                                  {row.url}
-                                </a>
-                              ) : (
-                                <span className="text-xs text-[#9ca3af]">-</span>
-                              )}
-                            </td>
-                            <td className="px-2 py-2 align-top">{renderImageCell(row)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            </motion.section>
-          )}
+            <Card>
+              <CardHeader title="结果 / Results" subtitle={`共 ${programRows.length} 条`} />
+              <div className="space-y-2">
+                {programLoading && <SkeletonList />}
 
-          {/* コード範囲探測 / CODE 区间探测 */}
-          {activeTab === 'probe' && (
-            <motion.section
-              key="probe"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.18 }}
-              className="space-y-4"
-            >
-              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-4 md:p-5 flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                  <Target className="w-4 h-4 text-pink-500" />
-                  <h2 className="text-[15px] md:text-[16px] font-semibold text-[#111827]">
-                    コード範囲探測 / CODE 区间探测
-                  </h2>
-                </div>
-                <p className="text-[12px] md:text-[13px] text-[#4b5563] leading-relaxed">
-                  まだ
-                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
-                    cpro
-                  </span>
-                  リストに載っていない可能性のある商品を、
-                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
-                    g/gCODE/
-                  </span>
-                  と
-                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
-                    itemimages/CODE_01.jpg
-                  </span>
-                  に対する HEAD リクエストで直接探測します。
-                  例：prefix=
-                  <span className="font-mono text-xs bg-pink-50 px-1.5 py-0.5 rounded mx-1">
-                    6742
-                  </span>
-                  ，范围 10〜40 → 674210〜674240 を一括チェック。
-                </p>
-              </div>
+                {!programLoading && programRows.length === 0 && <Empty>暂无结果。</Empty>}
 
-              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-4 md:p-5 space-y-3">
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
-                  <div>
-                    <label className="block text-[11px] md:text-[12px] text-[#6b7280] mb-1">
-                      プレフィックス / 前缀 (例: 6742)
-                    </label>
-                    <input
-                      value={probePrefix}
-                      onChange={(e) => setProbePrefix(e.target.value)}
-                      className="w-full rounded-xl border border-[#e5e7eb] bg-white/70 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-pink-200 focus:border-pink-400 font-mono"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] md:text-[12px] text-[#6b7280] mb-1">
-                      開始下2桁 / 起始后两位
-                    </label>
-                    <input
-                      type="number"
-                      value={probeMin}
-                      onChange={(e) => setProbeMin(Number(e.target.value) || 0)}
-                      className="w-full rounded-xl border border-[#e5e7eb] bg-white/70 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-pink-200 focus:border-pink-400"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] md:text-[12px] text-[#6b7280] mb-1">
-                      終了下2桁 / 结束后两位
-                    </label>
-                    <input
-                      type="number"
-                      value={probeMax}
-                      onChange={(e) => setProbeMax(Number(e.target.value) || 0)}
-                      className="w-full rounded-xl border border-[#e5e7eb] bg-white/70 px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-pink-200 focus:border-pink-400"
-                    />
-                  </div>
-                  <div className="flex items-end">
-                    <button
-                      type="button"
-                      onClick={handleProbeSearch}
-                      disabled={probeLoading}
-                      className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 text-white text-[13px] px-4 py-2.5 shadow-md hover:shadow-lg active:scale-[0.98] transition disabled:opacity-60"
-                    >
-                      {probeLoading ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                          探測中… / 探测中…
-                        </>
-                      ) : (
-                        <>
-                          <Search className="w-4 h-4" />
-                          コード探測 / 探测 CODE
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-
-                {probeLastRange && (
-                  <div className="flex-1 min-w-[200px]">
-                    <div className="flex items-center justify-between text-[11px] text-[#6b7280] mb-1">
-                      <span>探索进度 / Scan progress</span>
-                      <span>
-                        {probeResults.length} /{' '}
-                        {probeLastRange.max - probeLastRange.min + 1 || 1}
-                      </span>
+                {!programLoading &&
+                  programRows.map((r, idx) => (
+                    <div key={idx} className="rounded-2xl border border-black/10 bg-white p-3 hover:shadow-sm transition">
+                      <div className="text-[14px] font-medium text-[#111827]">{r.title || r.name || "Untitled"}</div>
+                      <div className="mt-2 flex items-center justify-between gap-2">
+                        <div className="text-[12px] text-[#6b7280] break-all">{r.url}</div>
+                        <button
+                          className="shrink-0 rounded-xl px-3 py-2 text-[12px] bg-[#f7f7f7] hover:bg-[#efefef]"
+                          onClick={() => copy(r.url)}
+                        >
+                          Copy URL
+                        </button>
+                      </div>
                     </div>
-                    <div className="w-full h-2 rounded-full bg-[#f3f4f6] overflow-hidden">
-                      <div
-                        className="h-2 bg-gradient-to-r from-pink-400 to-amber-400 transition-all"
-                        style={{ width: `${probeProgress}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
+                  ))}
               </div>
+            </Card>
+          </section>
+        )}
 
-              <div className="bg-white/80 backdrop-blur-md border border-[#e5e7eb] shadow-sm rounded-2xl p-3 md:p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-[14px] md:text-[15px] font-semibold text-[#111827] flex items-center gap-2">
-                    <Link2 className="w-4 h-4 text-pink-500" />
-                    探測結果 / 探测结果
-                  </h3>
-                  <span className="text-[11px] text-[#6b7280]">
-                    {probeResults.length} HIT
-                  </span>
-                </div>
-                {probeResults.length === 0 ? (
-                  <p className="text-[12px] text-[#9ca3af]">
-                    まだ HIT がありません。プレフィックスと下2桁範囲を指定して探測してみてください。
-                    / 暂无命中，请先指定前缀与后两位范围进行探测。
-                  </p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full text-[12px] md:text-[13px]">
-                      <thead>
-                        <tr className="border-b border-[#e5e7eb] bg-[#f9fafb]">
-                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
-                            CODE
-                          </th>
-                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
-                            PAGE / 页面
-                          </th>
-                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
-                            IMG / 图片
-                          </th>
-                          <th className="text-left px-2 py-2 font-medium text-[#6b7280]">
-                            画像プレビュー / 预览
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {probeResults.map((row, idx) => (
-                          <tr
-                            key={idx}
-                            className="border-b border-[#f3f4f6] hover:bg-pink-50/40 transition"
-                          >
-                            <td className="px-2 py-2 font-mono text-xs text-[#111827]">
-                              {row.code}
-                              <div className="text-[10px] text-[#9ca3af]">
-                                {row.page_ok ? 'PAGE✓ ' : 'PAGE× '}
-                                {row.img_ok ? 'IMG✓' : 'IMG×'}
-                              </div>
-                            </td>
-                            <td className="px-2 py-2 align-top">
-                              <a
-                                href={row.page_url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex items-center gap-1 text-blue-600 hover:underline break-all"
-                              >
-                                <ChevronRight className="w-3 h-3" />
-                                {row.page_url}
-                              </a>
-                            </td>
-                            <td className="px-2 py-2 align-top">
-                              <a
-                                href={row.img_url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className={`inline-flex items-center gap-1 break-all ${
-                                  row.img_ok
-                                    ? 'text-blue-600 hover:underline'
-                                    : 'text-[#9ca3af]'
-                                }`}
-                              >
-                                <ImageIcon className="w-3 h-3" />
-                                {row.img_url}
-                              </a>
-                            </td>
-                            <td className="px-2 py-2 align-top">
-                              {row.img_ok ? (
-                                renderImageCell({
-                                  code: row.code,
-                                  url: row.page_url,
-                                  title: `CODE ${row.code}`,
-                                })
-                              ) : (
-                                <span className="text-xs text-[#9ca3af]">
-                                  画像未上传 / 图片尚未存在
-                                </span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
+        {tab === "batch" && (
+          <section className="space-y-4">
+            <Card>
+              <CardHeader
+                title="公演名一括 / 批量检索"
+                subtitle="每行一个公演名（或关键词组合），自动对 /api/program 批量查询（可用于你后续扩展到更多类目）"
+              />
+              <textarea
+                value={batchInput}
+                onChange={(e) => setBatchInput(e.target.value)}
+                className="w-full min-h-[140px] rounded-2xl border border-black/10 bg-white p-3 text-[14px] focus:outline-none focus:ring-2 focus:ring-[#0f172a]/15"
+              />
+              <div className="mt-3">
+                <button
+                  onClick={runBatchSearch}
+                  className="rounded-xl bg-[#0f172a] text-white px-4 py-2 text-[14px] font-medium hover:opacity-95 inline-flex items-center gap-2"
+                  disabled={batchLoading}
+                >
+                  {batchLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                  実行 / 执行
+                </button>
               </div>
-            </motion.section>
-          )}
-        </AnimatePresence>
+            </Card>
+
+            <div className="space-y-3">
+              {batchLoading && <SkeletonList />}
+
+              {!batchLoading &&
+                Object.entries(batchResults).map(([k, arr]) => (
+                  <Card key={k}>
+                    <CardHeader title={k} subtitle={`命中 ${arr.length} 条`} />
+                    {arr.length === 0 ? (
+                      <Empty>无结果</Empty>
+                    ) : (
+                      <div className="space-y-2">
+                        {arr.map((r: any, idx: number) => (
+                          <div key={idx} className="rounded-2xl border border-black/10 bg-white p-3">
+                            <div className="text-[14px] font-medium text-[#111827]">{r.title || "Untitled"}</div>
+                            <div className="mt-2 flex items-center justify-between gap-2">
+                              <div className="text-[12px] text-[#6b7280] break-all">{r.url}</div>
+                              <button
+                                className="shrink-0 rounded-xl px-3 py-2 text-[12px] bg-[#f7f7f7] hover:bg-[#efefef]"
+                                onClick={() => copy(r.url)}
+                              >
+                                Copy URL
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </Card>
+                ))}
+            </div>
+          </section>
+        )}
       </main>
 
-      {/* 图片放大 Modal */}
+      {/* Lightbox */}
       <AnimatePresence>
-        {modalImage && (
+        {lightboxOpen && (
           <motion.div
-            className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-40"
+            className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
+            onClick={() => setLightboxOpen(false)}
           >
             <motion.div
-              className="bg-white rounded-2xl shadow-xl max-w-md w-[90%] md:w-[420px] p-4 relative"
-              initial={{ scale: 0.9, opacity: 0 }}
+              className="relative w-full max-w-4xl rounded-3xl overflow-hidden bg-white shadow-2xl"
+              initial={{ scale: 0.97, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
+              exit={{ scale: 0.97, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
             >
               <button
-                className="absolute top-2 right-3 text-[#6b7280] text-sm"
-                onClick={() => setModalImage(null)}
+                onClick={() => setLightboxOpen(false)}
+                className="absolute top-3 right-3 rounded-xl bg-black/70 text-white p-2 hover:bg-black/80"
               >
-                ✕
+                <X className="h-4 w-4" />
               </button>
-              <h3 className="text-[14px] md:text-[15px] font-semibold text-[#111827] mb-2 pr-6">
-                {modalTitle}
-              </h3>
-              <div className="border border-[#e5e7eb] rounded-xl overflow-hidden bg-[#f9fafb] flex items-center justify-center">
-                <img
-                  src={modalImage}
-                  alt={modalTitle}
-                  className="max-h-[60vh] w-auto object-contain"
-                />
+
+              <div className="p-3 border-b border-black/10 flex items-center justify-between gap-2">
+                <div className="text-[12px] text-[#6b7280] break-all pr-3">{lightboxUrl}</div>
+                <button
+                  className="shrink-0 rounded-xl px-3 py-2 text-[12px] bg-[#f7f7f7] hover:bg-[#efefef]"
+                  onClick={() => copy(lightboxUrl)}
+                >
+                  Copy
+                </button>
               </div>
-              <a
-                href={modalImage}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-3 inline-flex items-center gap-1 text-[12px] text-blue-600 hover:underline break-all"
-              >
-                <Link2 className="w-3 h-3" />
-                {modalImage}
-              </a>
+
+              <div className="bg-[#0b1020]">
+                <img src={lightboxUrl} alt="" className="w-full max-h-[78vh] object-contain" />
+              </div>
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      <ToastContainer position="bottom-right" theme="light" />
+      <footer className="py-6">
+        <div className="mx-auto max-w-6xl px-4 text-[12px] text-[#6b7280]">
+          © Takarazuka Link Finder — local tool for link discovery & image probing.
+        </div>
+      </footer>
     </div>
-  )
+  );
 }
 
-export default App
+function Card({ children }: React.PropsWithChildren) {
+  return (
+    <div className="rounded-3xl border border-black/10 bg-white/70 backdrop-blur shadow-[0_12px_30px_rgba(17,24,39,0.08)] p-4 md:p-5">
+      {children}
+    </div>
+  );
+}
+
+function CardHeader({ title, subtitle }: { title: string; subtitle?: string }) {
+  return (
+    <div className="mb-3">
+      <div className="text-[16px] md:text-[18px] font-semibold text-[#111827] tracking-tight">{title}</div>
+      {subtitle && <div className="mt-1 text-[12px] md:text-[13px] text-[#6b7280] leading-relaxed">{subtitle}</div>}
+    </div>
+  );
+}
+
+function Field({ label, children }: React.PropsWithChildren<{ label: string }>) {
+  return (
+    <div className="space-y-1">
+      <div className="text-[12px] text-[#6b7280]">{label}</div>
+      {children}
+    </div>
+  );
+}
+
+function Empty({ children }: React.PropsWithChildren) {
+  return (
+    <div className="rounded-2xl border border-dashed border-black/10 bg-white p-4 text-[13px] text-[#6b7280]">
+      {children}
+    </div>
+  );
+}
+
+function SkeletonList() {
+  return (
+    <div className="space-y-2">
+      {Array.from({ length: 6 }).map((_, i) => (
+        <div key={i} className="rounded-2xl border border-black/10 bg-white p-3">
+          <div className="h-4 w-1/3 bg-black/10 rounded mb-2" />
+          <div className="h-3 w-full bg-black/10 rounded" />
+        </div>
+      ))}
+    </div>
+  );
+}
